@@ -1,27 +1,25 @@
 # Technology Stack Recommendation
 
-## Stack Chosen
+## Project Context
 
-### Core Technologies
-- **Backend**: Go 1.23+ with standard library focus
-- **Frontend**: HTMX + Alpine.js + Tailwind CSS
-- **Database**: PostgreSQL 16+ with pgx driver
-- **Authentication**: Passkeys (WebAuthn) with session-based fallback
-- **Deployment**: Single binary + Docker container
-- **Reverse Proxy**: Caddy (automatic HTTPS)
-- **Observability**: OpenTelemetry with Prometheus metrics
-- **Testing**: Go's built-in testing + Playwright for E2E
+**What We're Building:** A product and project management layer on top of Google Issues, designed to enhance the basic issue tracking with enterprise-grade features including epics, themes, and comprehensive reporting capabilities. This tool synchronizes with Google Issues as the source of truth while adding the strategic planning and analytics features that development teams need but Google Issues lacks.
 
-### Supporting Tools
-- **Email**: Postmark for transactional emails
-- **File Storage**: Local filesystem → S3-compatible when scaling
-- **Background Jobs**: Built-in goroutines → River (Postgres-based) when needed
-- **Caching**: In-memory map → Redis when scaling
-- **Search**: PostgreSQL full-text → Meilisearch when needed
+**Team & Goals:** This is a single-developer project with FOSS and pre-revenue startup constraints. Our goals are to:
+- Ship an MVP rapidly that can compete with tools like Jira/Linear in functionality
+- Maintain the simplicity of Google Issues while adding power-user features
+- Build something that can be self-hosted by small teams or run as a SaaS
+- Keep operational complexity minimal so the solo developer can focus on features, not infrastructure
 
 ## Executive Summary
 
 This stack is designed around a fundamental principle: **maximize developer velocity while maintaining professional standards**. Every choice prioritizes what a solo Go developer can realistically build and maintain.
+
+For a Google Issues frontend with product management features, this stack delivers:
+- **Zero operational overhead** with SQLite embedded database
+- **HTML-over-the-wire** architecture eliminating frontend complexity
+- **Single binary deployment** for true FOSS distribution
+- **Built-in analytics** with zero-latency reporting
+- **Passkeys authentication** eliminating password management
 
 ### Why This Stack Works
 
@@ -32,12 +30,12 @@ This stack is designed around a fundamental principle: **maximize developer velo
 - Progressive enhancement means it works everywhere
 - Zero npm dependencies to manage
 
-**2. PostgreSQL as the Foundation**
-- One database for everything initially (JSONB for documents, arrays for queues)
-- Rock-solid reliability with 30+ years of battle testing
-- Excellent Go driver (pgx) with type safety
-- Built-in full-text search delays need for separate search infrastructure
-- Can handle millions of users before needing alternatives
+**2. SQLite as the Foundation**
+- Embedded database - no separate process to manage
+- Perfect for sync-heavy workloads with single writer pattern
+- Excellent pure-Go driver (modernc.org/sqlite) - no CGO needed
+- Built-in full-text search (FTS5) rivals dedicated search engines
+- Scales to billions of rows and hundreds of GB
 
 **3. Passkeys-First Authentication**
 - More secure than passwords by default
@@ -65,9 +63,28 @@ This stack is designed around a fundamental principle: **maximize developer velo
 This stack will handle your first 10,000 users without architectural changes. When you need to scale:
 - Add Redis for caching (not before you measure need)
 - Move to S3 for file storage (local is fine initially)
-- Add River for background jobs (goroutines work initially)
-- Consider read replicas before microservices
-- Add Meilisearch only when PostgreSQL FTS shows limits
+- Consider PostgreSQL migration only if you need true multi-writer concurrency
+- SQLite's FTS5 eliminates need for separate search for most use cases
+- Distribute read-only copies for scaling reads horizontally
+
+## Stack Chosen
+
+### Core Technologies
+- **Backend**: Go 1.23+ with standard library focus
+- **Frontend**: HTMX + Alpine.js + Tailwind CSS
+- **Database**: SQLite with modernc.org/sqlite driver (pure Go, no CGO)
+- **Authentication**: Passkeys (WebAuthn) with session-based fallback
+- **Deployment**: Single binary + Docker container
+- **Reverse Proxy**: Caddy (automatic HTTPS)
+- **Observability**: OpenTelemetry with Prometheus metrics
+- **Testing**: Go's built-in testing + Playwright for E2E
+
+### Supporting Tools
+- **Email**: Postmark for transactional emails
+- **File Storage**: Local filesystem → S3-compatible when scaling
+- **Background Jobs**: Built-in goroutines with channels for coordination
+- **Caching**: In-memory map → Redis when scaling
+- **Search**: SQLite FTS5 (built-in, excellent performance)
 
 ## Detailed Breakdown By Component
 
@@ -102,7 +119,7 @@ func (app *App) routes() http.Handler {
 ```
 
 **Key Libraries (minimal, focused):**
-- `pgx/v5`: PostgreSQL driver (faster than database/sql)
+- `modernc.org/sqlite`: Pure Go SQLite driver (no CGO required)
 - `golang-jwt/jwt`: If you need JWTs (prefer sessions)
 - `go-webauthn/webauthn`: Passkey authentication
 - `templ`: Type-safe templates (optional but recommended)
@@ -158,36 +175,238 @@ func (app *App) routes() http.Handler {
 <script src="https://cdn.tailwindcss.com"></script> <!-- Dev only, use CLI for prod -->
 ```
 
-### Database: PostgreSQL
+### Database: SQLite
 
-**Why PostgreSQL:**
-- One database for everything initially
-- JSONB for document storage when needed
-- Arrays and JSON for queue-like operations
-- Row-level security if you need multi-tenancy
-- Boring, stable, well-documented
+#### Why SQLite Over PostgreSQL for This Specific Product
 
-**Schema Philosophy:**
+After careful analysis of this product's requirements - a Google Issues frontend with product management features - **SQLite is the pragmatically correct choice**. Here's why:
+
+**1. Perfect Fit for the Data Model**
+- This is fundamentally a **cache with enrichments** - Google Issues is the source of truth
+- You're storing issue metadata, epics, themes, and computed reports
+- The write pattern is primarily from sync operations (single writer pattern)
+- Reads dominate writes by orders of magnitude (viewing reports, dashboards)
+
+**2. Deployment Simplicity That Matters**
+- Ship as a true single binary with embedded database
+- Zero operational overhead - no PostgreSQL to provision, monitor, or backup
+- Perfect for FOSS distribution - users just download and run
+- Can even run as a desktop app if needed
+
+**3. Sync Architecture Benefits**
+- SQLite's single-writer model actually HELPS here - prevents sync conflicts
+- Use WAL mode for concurrent reads during sync operations
+- Transaction boundaries map perfectly to API sync batches
+- Built-in backup while running (`.backup` command or API)
+
+**4. Superior Performance for Your Use Case**
+- Analytical queries (reports) are FASTER than PostgreSQL for small-medium datasets
+- No network roundtrip - queries execute in-process
+- Full-text search built-in and excellent
+- Common Table Expressions (CTEs) for complex reporting queries
+
+**5. The Killer Advantage: Embedded Analytics**
+
+For a reporting-focused tool, SQLite offers something PostgreSQL cannot: **zero-latency analytics**. Your Go code can:
+- Execute complex analytical queries in microseconds
+- Build materialized views in memory
+- Compute aggregations without network overhead
+- Cache computed results right in the database
+
+#### Schema Design
 ```sql
--- Start simple, normalize later
-CREATE TABLE users (
-    id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    email      TEXT UNIQUE NOT NULL,
-    auth_data  JSONB NOT NULL, -- Passkey credentials
-    metadata   JSONB DEFAULT '{}', -- Flexible fields
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
+-- Pragmas for optimal performance
+PRAGMA journal_mode = WAL;
+PRAGMA synchronous = NORMAL;
+PRAGMA cache_size = -64000; -- 64MB cache
+PRAGMA temp_store = MEMORY;
+PRAGMA mmap_size = 30000000000; -- 30GB mmap
+
+-- Schema optimized for sync + reporting
+CREATE TABLE issues (
+    id            TEXT PRIMARY KEY,
+    google_id     TEXT UNIQUE NOT NULL,
+    title         TEXT NOT NULL,
+    description   TEXT,
+    status        TEXT,
+    labels        JSON,
+    epic_id       TEXT REFERENCES epics(id),
+    theme_id      TEXT REFERENCES themes(id),
+    synced_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+    metadata      JSON -- Flexible fields
 );
 
--- Use PostgreSQL features instead of adding services
-CREATE INDEX idx_users_email ON users(email);
-CREATE INDEX idx_users_metadata ON users USING GIN (metadata);
+CREATE TABLE epics (
+    id           TEXT PRIMARY KEY,
+    title        TEXT NOT NULL,
+    description  TEXT,
+    theme_id     TEXT REFERENCES themes(id),
+    created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Indexes for common queries
+CREATE INDEX idx_issues_epic ON issues(epic_id);
+CREATE INDEX idx_issues_status ON issues(status);
+CREATE INDEX idx_issues_synced ON issues(synced_at);
+
+-- Full-text search
+CREATE VIRTUAL TABLE issues_fts USING fts5(
+    title, description, content=issues, content_rowid=rowid
+);
+
+-- Triggers to keep FTS updated
+CREATE TRIGGER issues_fts_insert AFTER INSERT ON issues BEGIN
+    INSERT INTO issues_fts(rowid, title, description) 
+    VALUES (new.rowid, new.title, new.description);
+END;
 ```
 
-**Migration Strategy:**
-- Start with raw SQL files numbered sequentially
-- Use `golang-migrate` when you need rollbacks
-- Keep migrations idempotent when possible
+**Go Implementation Pattern:**
+```go
+import "modernc.org/sqlite"
+
+type DB struct {
+    *sql.DB
+    syncMutex sync.Mutex // Serialize sync operations
+}
+
+func NewDB(path string) (*DB, error) {
+    dsn := fmt.Sprintf("file:%s?_journal=WAL&_timeout=5000&_sync=NORMAL&_cache=shared", path)
+    db, err := sql.Open("sqlite", dsn)
+    if err != nil {
+        return nil, err
+    }
+    
+    // Set connection pool appropriately for SQLite
+    db.SetMaxOpenConns(1) // For write operations
+    db.SetMaxIdleConns(1)
+    
+    return &DB{DB: db}, nil
+}
+
+// Sync pattern that leverages SQLite's strengths
+func (db *DB) SyncIssues(issues []Issue) error {
+    db.syncMutex.Lock()
+    defer db.syncMutex.Unlock()
+    
+    tx, err := db.Begin()
+    if err != nil {
+        return err
+    }
+    defer tx.Rollback()
+    
+    // Clear and reload pattern - perfect for SQLite
+    _, err = tx.Exec("DELETE FROM issues WHERE source = 'google'")
+    if err != nil {
+        return err
+    }
+    
+    stmt, err := tx.Prepare(`
+        INSERT INTO issues (google_id, title, description, status, labels)
+        VALUES (?, ?, ?, ?, ?)
+    `)
+    if err != nil {
+        return err
+    }
+    defer stmt.Close()
+    
+    for _, issue := range issues {
+        _, err = stmt.Exec(issue.GoogleID, issue.Title, issue.Description, issue.Status, issue.Labels)
+        if err != nil {
+            return err
+        }
+    }
+    
+    return tx.Commit()
+}
+```
+
+#### Addressing Common SQLite Concerns
+
+**"But what about concurrent writes?"**
+- You have ONE writer: the sync process
+- Users create epics/themes infrequently 
+- WAL mode handles read concurrency perfectly
+- Queue writes through channels if needed
+
+**"But what about scale?"**
+- SQLite handles billions of rows efficiently
+- Comfortable with databases up to 100GB
+- If you have 100GB of issue metadata, you've already IPO'd
+- Migration path exists: replicate to PostgreSQL when needed
+
+**"But what about backups?"**
+- Built-in online backup API
+- Can backup while running
+- Simple file copy when using WAL mode correctly
+- Version control the database file for FOSS distribution
+
+#### Configuration and Connection Patterns
+
+```go
+// Connection String Patterns
+// Development
+"file:./data/dev.db?_journal=WAL&_timeout=5000"
+
+// Production
+"file:/var/lib/myapp/prod.db?_journal=WAL&_timeout=5000&_sync=NORMAL"
+
+// Testing
+"file::memory:?_journal=WAL"
+```
+
+#### Migration Strategy
+
+- Embed migrations in binary using embed package
+- Run migrations on startup
+- Use simple numbered SQL files
+- Version the database schema in a table
+
+#### Backup Strategy
+
+```go
+func (db *DB) Backup(destPath string) error {
+    destDB, err := sql.Open("sqlite", destPath)
+    if err != nil {
+        return err
+    }
+    defer destDB.Close()
+    
+    return db.ExecContext(ctx, fmt.Sprintf("VACUUM INTO '%s'", destPath))
+}
+```
+
+#### Migration Path: SQLite to PostgreSQL (If Ever Needed)
+
+**When to Consider Migration:**
+- Multiple concurrent writers become critical (not just nice-to-have)
+- Geographic distribution requires true replication
+- Need for advanced PostgreSQL-only features (e.g., pub/sub with LISTEN/NOTIFY)
+- Team growth requires familiar technology
+
+**Migration is Straightforward:**
+1. Both databases use standard SQL
+2. Export data using SQLite's `.dump` command
+3. Transform SQLite-specific syntax (minimal differences)
+4. Import into PostgreSQL
+5. Update connection string and driver
+
+**Key Differences to Handle:**
+```sql
+-- SQLite
+AUTOINCREMENT
+datetime('now')
+JSON type
+
+-- PostgreSQL  
+SERIAL/BIGSERIAL
+NOW()
+JSONB type
+```
+
+The beauty is you can defer this decision until you have real data proving you need it. Most applications never do.
 
 ### Authentication: Passkeys with Session Fallback
 
@@ -293,13 +512,22 @@ func TestCalculatePrice(t *testing.T) {
 
 **Integration Tests:**
 ```go
-// Test with real PostgreSQL using testcontainers
+// Test with in-memory SQLite - no containers needed
 func TestUserCreation(t *testing.T) {
-    db := setupTestDB(t)
+    db := setupTestDB(t) // Uses ":memory:" database
     defer db.Close()
     
     user := CreateUser(db, "test@example.com")
     assert.NotNil(t, user.ID)
+}
+
+func setupTestDB(t *testing.T) *sql.DB {
+    db, err := sql.Open("sqlite", ":memory:")
+    require.NoError(t, err)
+    
+    // Run migrations
+    RunMigrations(db)
+    return db
 }
 ```
 
@@ -342,13 +570,13 @@ func securityHeaders(next http.Handler) http.Handler {
 
 ## Migration Paths
 
-### When You Hit Limits
+### When You Hit SQLite Limits (Unlikely for This Use Case)
 
 **1. Performance Bottlenecks:**
-- First: Add appropriate indexes
-- Second: Implement caching (Redis)
-- Third: Read replicas
-- Last: Microservices
+- First: Optimize queries and add appropriate indexes
+- Second: Implement query result caching in-memory
+- Third: Distribute read-only copies for read scaling
+- Last: Migrate to PostgreSQL if you need true multi-writer concurrency
 
 **2. Feature Complexity:**
 - First: Better code organization (packages)
@@ -368,10 +596,11 @@ func securityHeaders(next http.Handler) http.Handler {
 1. **Starting with microservices** - You don't need them yet
 2. **Using Kubernetes** - A VPS with systemd is fine initially
 3. **Complex authentication** - Passkeys or magic links, not OAuth initially
-4. **NoSQL as primary database** - PostgreSQL can do documents too
+4. **NoSQL as primary database** - SQLite with JSON support handles documents
 5. **React/Vue/Angular** - HTMX delivers the same UX with 10% of the complexity
 6. **GraphQL** - REST is fine, you control both ends
-7. **Message queues** - PostgreSQL LISTEN/NOTIFY or goroutines first
+7. **Message queues** - Channels and goroutines first
+8. **PostgreSQL for single-user/small team tools** - SQLite is superior here
 
 ### Do This Instead:
 1. **Monolith first** - Easy to reason about and deploy

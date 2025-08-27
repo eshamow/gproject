@@ -16,6 +16,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,7 +31,8 @@ var templateFS embed.FS
 
 type App struct {
 	db          *sql.DB
-	tmpl        *template.Template
+	tmpl        *template.Template // deprecated - use templates instead
+	templates   map[string]*template.Template
 	config      Config
 	rateLimiter *RateLimiter
 }
@@ -130,12 +132,25 @@ func main() {
 	// Run migrations on startup
 	runMigrations(db)
 
-	// Parse templates
-	tmpl := template.Must(template.New("").ParseFS(templateFS, "templates/*.html"))
+	// Parse templates - create a separate template instance for each page
+	// to avoid block name conflicts between dashboard and issues templates
+	templates := make(map[string]*template.Template)
+	
+	// List of page templates
+	pages := []string{"home.html", "dashboard.html", "issues.html"}
+	
+	for _, page := range pages {
+		// Parse base.html and the specific page template together
+		t, err := template.ParseFS(templateFS, "templates/base.html", "templates/"+page)
+		if err != nil {
+			log.Fatalf("Failed to parse %s: %v", page, err)
+		}
+		templates[page] = t
+	}
 
 	app := &App{
 		db:          db,
-		tmpl:        tmpl,
+		templates:   templates,
 		config:      config,
 		rateLimiter: NewRateLimiter(),
 	}
@@ -147,7 +162,13 @@ func main() {
 	mux.HandleFunc("/logout", app.handleLogout)
 	mux.HandleFunc("/auth/callback", app.handleCallback)
 	mux.HandleFunc("/dashboard", app.requireAuth(app.handleDashboard))
+	mux.HandleFunc("/issues", app.requireAuth(app.handleIssues))
 	mux.HandleFunc("/sync", app.requireAuth(app.handleSync))
+	
+	// API endpoints for issues
+	mux.HandleFunc("/api/issues", app.requireAuth(app.handleAPIIssues))
+	mux.HandleFunc("/api/issues/search", app.requireAuth(app.handleAPIIssuesSearch))
+	mux.HandleFunc("/api/sync/status", app.requireAuth(app.handleAPISyncStatus))
 
 	// Wrap with security headers middleware
 	handler := app.securityHeaders(mux)
@@ -172,7 +193,7 @@ func (app *App) handleHome(w http.ResponseWriter, r *http.Request) {
 		"User": user,
 	}
 
-	if err := app.tmpl.ExecuteTemplate(w, "home.html", data); err != nil {
+	if err := app.templates["home.html"].ExecuteTemplate(w, "base.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
@@ -210,7 +231,7 @@ func (app *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		"CSRFToken": csrfToken,
 	}
 
-	if err := app.tmpl.ExecuteTemplate(w, "dashboard.html", data); err != nil {
+	if err := app.templates["dashboard.html"].ExecuteTemplate(w, "base.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
@@ -446,6 +467,33 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
 }
 
+func (app *App) handleIssues(w http.ResponseWriter, r *http.Request) {
+	user := app.getCurrentUser(r)
+	
+	// Generate CSRF token for this session
+	var csrfToken string
+	if cookie, err := r.Cookie("session"); err == nil {
+		csrfToken = app.generateCSRFToken(cookie.Value)
+	}
+	
+	data := struct {
+		User      *User
+		CSRFToken string
+		RepoOwner string
+		RepoName  string
+	}{
+		User:      user,
+		CSRFToken: csrfToken,
+		RepoOwner: app.config.GitHubRepoOwner,
+		RepoName:  app.config.GitHubRepoName,
+	}
+	
+	if err := app.templates["issues.html"].ExecuteTemplate(w, "base.html", data); err != nil {
+		log.Printf("Error rendering issues template: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+	}
+}
+
 func (app *App) handleSync(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -496,88 +544,425 @@ func (app *App) syncIssues(accessToken string) {
 	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: accessToken})
 	client := oauth2.NewClient(ctx, ts)
 
-	// Fetch issues from GitHub
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues?state=all&per_page=100",
+	// First, sync repository information
+	repoURL := fmt.Sprintf("https://api.github.com/repos/%s/%s",
 		app.config.GitHubRepoOwner, app.config.GitHubRepoName)
-
-	resp, err := client.Get(url)
+	
+	respRepo, err := client.Get(repoURL)
 	if err != nil {
-		log.Printf("Failed to fetch issues: %v", err)
+		log.Printf("Failed to fetch repository info: %v", err)
 		return
 	}
-	defer resp.Body.Close()
-
-	var issues []struct {
-		ID        int64     `json:"id"`
-		Number    int       `json:"number"`
-		Title     string    `json:"title"`
-		Body      string    `json:"body"`
-		State     string    `json:"state"`
-		CreatedAt time.Time `json:"created_at"`
-		UpdatedAt time.Time `json:"updated_at"`
-		ClosedAt  *time.Time `json:"closed_at"`
-		User      struct {
+	defer respRepo.Body.Close()
+	
+	var repo struct {
+		ID              int64     `json:"id"`
+		Name            string    `json:"name"`
+		FullName        string    `json:"full_name"`
+		Description     string    `json:"description"`
+		Private         bool      `json:"private"`
+		DefaultBranch   string    `json:"default_branch"`
+		StargazersCount int       `json:"stargazers_count"`
+		OpenIssuesCount int       `json:"open_issues_count"`
+		CreatedAt       time.Time `json:"created_at"`
+		UpdatedAt       time.Time `json:"updated_at"`
+		Owner           struct {
 			Login string `json:"login"`
-		} `json:"user"`
-		Assignee *struct {
-			Login string `json:"login"`
-		} `json:"assignee"`
-		Labels []struct {
-			Name  string `json:"name"`
-			Color string `json:"color"`
-		} `json:"labels"`
-		Milestone *struct {
-			Title string `json:"title"`
-		} `json:"milestone"`
+		} `json:"owner"`
 	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&issues); err != nil {
-		log.Printf("Failed to parse issues: %v", err)
+	
+	if err := json.NewDecoder(respRepo.Body).Decode(&repo); err != nil {
+		log.Printf("Failed to parse repository info: %v", err)
 		return
 	}
+	
+	// Save repository information
+	_, err = app.db.Exec(`
+		INSERT INTO repositories (
+			github_id, owner, name, full_name, description,
+			default_branch, private, stargazers_count, open_issues_count,
+			created_at, updated_at, synced_at
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(github_id) DO UPDATE SET
+			name = excluded.name,
+			full_name = excluded.full_name,
+			description = excluded.description,
+			default_branch = excluded.default_branch,
+			private = excluded.private,
+			stargazers_count = excluded.stargazers_count,
+			open_issues_count = excluded.open_issues_count,
+			updated_at = excluded.updated_at,
+			synced_at = excluded.synced_at
+	`, repo.ID, repo.Owner.Login, repo.Name, repo.FullName, repo.Description,
+		repo.DefaultBranch, repo.Private, repo.StargazersCount, repo.OpenIssuesCount,
+		repo.CreatedAt, repo.UpdatedAt, time.Now())
+	
+	if err != nil {
+		log.Printf("Failed to save repository info: %v", err)
+	}
 
-	// Save issues to database
-	for _, issue := range issues {
-		labels, _ := json.Marshal(issue.Labels)
-		
-		var assignee string
-		if issue.Assignee != nil {
-			assignee = issue.Assignee.Login
-		}
-		
-		var milestone string
-		if issue.Milestone != nil {
-			milestone = issue.Milestone.Title
-		}
+	// Fetch all issues with pagination
+	page := 1
+	totalSynced := 0
+	
+	for {
+		url := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues?state=all&per_page=100&page=%d",
+			app.config.GitHubRepoOwner, app.config.GitHubRepoName, page)
 
-		_, err := app.db.Exec(`
-			INSERT INTO issues (
-				github_id, number, title, body, state, labels,
-				assignee, author, milestone, created_at, updated_at,
-				closed_at, synced_at
-			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT(github_id) DO UPDATE SET
-				number = excluded.number,
-				title = excluded.title,
-				body = excluded.body,
-				state = excluded.state,
-				labels = excluded.labels,
-				assignee = excluded.assignee,
-				milestone = excluded.milestone,
-				updated_at = excluded.updated_at,
-				closed_at = excluded.closed_at,
-				synced_at = excluded.synced_at
-		`, issue.ID, issue.Number, issue.Title, issue.Body, issue.State,
-			string(labels), assignee, issue.User.Login, milestone,
-			issue.CreatedAt, issue.UpdatedAt, issue.ClosedAt, time.Now())
-
+		resp, err := client.Get(url)
 		if err != nil {
-			log.Printf("Failed to save issue #%d: %v", issue.Number, err)
+			log.Printf("Failed to fetch issues page %d: %v", page, err)
+			return
+		}
+		defer resp.Body.Close()
+
+		var issues []struct {
+			ID        int64     `json:"id"`
+			Number    int       `json:"number"`
+			Title     string    `json:"title"`
+			Body      string    `json:"body"`
+			State     string    `json:"state"`
+			CreatedAt time.Time `json:"created_at"`
+			UpdatedAt time.Time `json:"updated_at"`
+			ClosedAt  *time.Time `json:"closed_at"`
+			User      struct {
+				Login string `json:"login"`
+			} `json:"user"`
+			Assignee *struct {
+				Login string `json:"login"`
+			} `json:"assignee"`
+			Labels []struct {
+				Name  string `json:"name"`
+				Color string `json:"color"`
+			} `json:"labels"`
+			Milestone *struct {
+				Title string `json:"title"`
+			} `json:"milestone"`
+			PullRequest *struct {
+				URL string `json:"url"`
+			} `json:"pull_request"`
+		}
+
+		if err := json.NewDecoder(resp.Body).Decode(&issues); err != nil {
+			log.Printf("Failed to parse issues: %v", err)
+			break
+		}
+		
+		if len(issues) == 0 {
+			break // No more issues
+		}
+
+		// Save issues to database (skip pull requests)
+		for _, issue := range issues {
+			// Skip pull requests (they appear as issues in the API)
+			if issue.PullRequest != nil {
+				continue
+			}
+			
+			labels, _ := json.Marshal(issue.Labels)
+			
+			var assignee string
+			if issue.Assignee != nil {
+				assignee = issue.Assignee.Login
+			}
+			
+			var milestone string
+			if issue.Milestone != nil {
+				milestone = issue.Milestone.Title
+			}
+
+			_, err := app.db.Exec(`
+				INSERT INTO issues (
+					github_id, number, title, body, state, labels,
+					assignee, author, milestone, created_at, updated_at,
+					closed_at, synced_at
+				)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				ON CONFLICT(github_id) DO UPDATE SET
+					number = excluded.number,
+					title = excluded.title,
+					body = excluded.body,
+					state = excluded.state,
+					labels = excluded.labels,
+					assignee = excluded.assignee,
+					milestone = excluded.milestone,
+					updated_at = excluded.updated_at,
+					closed_at = excluded.closed_at,
+					synced_at = excluded.synced_at
+			`, issue.ID, issue.Number, issue.Title, issue.Body, issue.State,
+				string(labels), assignee, issue.User.Login, milestone,
+				issue.CreatedAt, issue.UpdatedAt, issue.ClosedAt, time.Now())
+
+			if err != nil {
+				log.Printf("Failed to save issue #%d: %v", issue.Number, err)
+			} else {
+				totalSynced++
+			}
+		}
+		
+		page++
+		if len(issues) < 100 {
+			break // Last page
 		}
 	}
 
-	log.Printf("Synced %d issues", len(issues))
+	log.Printf("Synced %d issues total", totalSynced)
+}
+
+// API endpoint to get all issues with optional filtering
+func (app *App) handleAPIIssues(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	// Parse query parameters
+	state := r.URL.Query().Get("state") // open, closed, or all
+	limit := 100
+	offset := 0
+	
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if parsed, err := fmt.Sscanf(l, "%d", &limit); err == nil && parsed == 1 && limit > 0 && limit <= 1000 {
+			// limit is valid
+		} else {
+			limit = 100
+		}
+	}
+	
+	if o := r.URL.Query().Get("offset"); o != "" {
+		if parsed, err := fmt.Sscanf(o, "%d", &offset); err == nil && parsed == 1 && offset >= 0 {
+			// offset is valid
+		} else {
+			offset = 0
+		}
+	}
+	
+	// Build query
+	query := `
+		SELECT 
+			id, github_id, number, title, body, state, labels,
+			assignee, author, milestone, created_at, updated_at,
+			closed_at, synced_at
+		FROM issues
+	`
+	
+	var args []interface{}
+	if state != "" && state != "all" {
+		query += " WHERE state = ?"
+		args = append(args, state)
+	}
+	
+	query += " ORDER BY updated_at DESC LIMIT ? OFFSET ?"
+	args = append(args, limit, offset)
+	
+	rows, err := app.db.Query(query, args...)
+	if err != nil {
+		http.Error(w, `{"error":"Failed to fetch issues"}`, http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	
+	type Issue struct {
+		ID        int64      `json:"id"`
+		GitHubID  int64      `json:"github_id"`
+		Number    int        `json:"number"`
+		Title     string     `json:"title"`
+		Body      string     `json:"body"`
+		State     string     `json:"state"`
+		Labels    string     `json:"labels_raw"`
+		Assignee  *string    `json:"assignee"`
+		Author    string     `json:"author"`
+		Milestone *string    `json:"milestone"`
+		CreatedAt time.Time  `json:"created_at"`
+		UpdatedAt time.Time  `json:"updated_at"`
+		ClosedAt  *time.Time `json:"closed_at"`
+		SyncedAt  time.Time  `json:"synced_at"`
+	}
+	
+	var issues []Issue
+	for rows.Next() {
+		var issue Issue
+		var assignee, milestone sql.NullString
+		var closedAt sql.NullTime
+		
+		err := rows.Scan(
+			&issue.ID, &issue.GitHubID, &issue.Number, &issue.Title,
+			&issue.Body, &issue.State, &issue.Labels, &assignee,
+			&issue.Author, &milestone, &issue.CreatedAt, &issue.UpdatedAt,
+			&closedAt, &issue.SyncedAt,
+		)
+		if err != nil {
+			log.Printf("Failed to scan issue: %v", err)
+			continue
+		}
+		
+		if assignee.Valid {
+			issue.Assignee = &assignee.String
+		}
+		if milestone.Valid {
+			issue.Milestone = &milestone.String
+		}
+		if closedAt.Valid {
+			issue.ClosedAt = &closedAt.Time
+		}
+		
+		issues = append(issues, issue)
+	}
+	
+	// Count total issues for pagination
+	var total int
+	countQuery := "SELECT COUNT(*) FROM issues"
+	if state != "" && state != "all" {
+		countQuery += " WHERE state = ?"
+		err = app.db.QueryRow(countQuery, state).Scan(&total)
+	} else {
+		err = app.db.QueryRow(countQuery).Scan(&total)
+	}
+	
+	if err != nil {
+		log.Printf("Failed to count issues: %v", err)
+	}
+	
+	response := map[string]interface{}{
+		"issues": issues,
+		"total":  total,
+		"limit":  limit,
+		"offset": offset,
+	}
+	
+	json.NewEncoder(w).Encode(response)
+}
+
+// API endpoint for searching issues
+func (app *App) handleAPIIssuesSearch(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	query := r.URL.Query().Get("q")
+	if query == "" {
+		http.Error(w, `{"error":"Query parameter 'q' is required"}`, http.StatusBadRequest)
+		return
+	}
+	
+	limit := 50
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if parsed, err := fmt.Sscanf(l, "%d", &limit); err == nil && parsed == 1 && limit > 0 && limit <= 100 {
+			// limit is valid
+		} else {
+			limit = 50
+		}
+	}
+	
+	// Simple full-text search in title and body
+	searchQuery := `
+		SELECT 
+			id, github_id, number, title, body, state, labels,
+			assignee, author, milestone, created_at, updated_at,
+			closed_at, synced_at
+		FROM issues
+		WHERE (title LIKE ? OR body LIKE ? OR labels LIKE ?)
+		ORDER BY updated_at DESC
+		LIMIT ?
+	`
+	
+	searchPattern := "%" + query + "%"
+	rows, err := app.db.Query(searchQuery, searchPattern, searchPattern, searchPattern, limit)
+	if err != nil {
+		http.Error(w, `{"error":"Failed to search issues"}`, http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	
+	type Issue struct {
+		ID        int64      `json:"id"`
+		GitHubID  int64      `json:"github_id"`
+		Number    int        `json:"number"`
+		Title     string     `json:"title"`
+		Body      string     `json:"body"`
+		State     string     `json:"state"`
+		Labels    string     `json:"labels_raw"`
+		Assignee  *string    `json:"assignee"`
+		Author    string     `json:"author"`
+		Milestone *string    `json:"milestone"`
+		CreatedAt time.Time  `json:"created_at"`
+		UpdatedAt time.Time  `json:"updated_at"`
+		ClosedAt  *time.Time `json:"closed_at"`
+		SyncedAt  time.Time  `json:"synced_at"`
+	}
+	
+	var issues []Issue
+	for rows.Next() {
+		var issue Issue
+		var assignee, milestone sql.NullString
+		var closedAt sql.NullTime
+		
+		err := rows.Scan(
+			&issue.ID, &issue.GitHubID, &issue.Number, &issue.Title,
+			&issue.Body, &issue.State, &issue.Labels, &assignee,
+			&issue.Author, &milestone, &issue.CreatedAt, &issue.UpdatedAt,
+			&closedAt, &issue.SyncedAt,
+		)
+		if err != nil {
+			log.Printf("Failed to scan issue: %v", err)
+			continue
+		}
+		
+		if assignee.Valid {
+			issue.Assignee = &assignee.String
+		}
+		if milestone.Valid {
+			issue.Milestone = &milestone.String
+		}
+		if closedAt.Valid {
+			issue.ClosedAt = &closedAt.Time
+		}
+		
+		issues = append(issues, issue)
+	}
+	
+	response := map[string]interface{}{
+		"issues": issues,
+		"query":  query,
+		"count":  len(issues),
+	}
+	
+	json.NewEncoder(w).Encode(response)
+}
+
+// API endpoint to check sync status
+func (app *App) handleAPISyncStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	// Get last sync time for repository
+	var lastSync sql.NullTime
+	err := app.db.QueryRow(`
+		SELECT synced_at FROM repositories 
+		WHERE owner = ? AND name = ?
+		ORDER BY synced_at DESC LIMIT 1
+	`, app.config.GitHubRepoOwner, app.config.GitHubRepoName).Scan(&lastSync)
+	
+	var lastSyncTime *time.Time
+	if err == nil && lastSync.Valid {
+		lastSyncTime = &lastSync.Time
+	}
+	
+	// Count issues
+	var totalIssues, openIssues, closedIssues int
+	app.db.QueryRow("SELECT COUNT(*) FROM issues").Scan(&totalIssues)
+	app.db.QueryRow("SELECT COUNT(*) FROM issues WHERE state = 'open'").Scan(&openIssues)
+	app.db.QueryRow("SELECT COUNT(*) FROM issues WHERE state = 'closed'").Scan(&closedIssues)
+	
+	response := map[string]interface{}{
+		"repository": map[string]string{
+			"owner": app.config.GitHubRepoOwner,
+			"name":  app.config.GitHubRepoName,
+		},
+		"last_sync": lastSyncTime,
+		"stats": map[string]int{
+			"total":  totalIssues,
+			"open":   openIssues,
+			"closed": closedIssues,
+		},
+	}
+	
+	json.NewEncoder(w).Encode(response)
 }
 
 func (app *App) getOAuthConfig() *oauth2.Config {
@@ -619,6 +1004,16 @@ func (app *App) requireAuth(handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		user := app.getCurrentUser(r)
 		if user == nil {
+			// For API endpoints, return JSON error
+			if strings.HasPrefix(r.URL.Path, "/api/") {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error": "Authentication required",
+				})
+				return
+			}
+			// For regular pages, redirect to login
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
 			return
 		}
@@ -869,17 +1264,25 @@ func runMigrations(db *sql.DB) {
 
 	CREATE TABLE IF NOT EXISTS repositories (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		github_id INTEGER UNIQUE,
 		owner TEXT NOT NULL,
 		name TEXT NOT NULL,
 		full_name TEXT UNIQUE,
 		description TEXT,
 		default_branch TEXT,
+		private BOOLEAN DEFAULT 0,
+		stargazers_count INTEGER DEFAULT 0,
+		open_issues_count INTEGER DEFAULT 0,
+		created_at DATETIME,
+		updated_at DATETIME,
 		synced_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		UNIQUE(owner, name)
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_issues_state ON issues(state);
 	CREATE INDEX IF NOT EXISTS idx_issues_number ON issues(number);
+	CREATE INDEX IF NOT EXISTS idx_issues_updated ON issues(updated_at);
+	CREATE INDEX IF NOT EXISTS idx_issues_created ON issues(created_at);
 	CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
 
 	CREATE TABLE IF NOT EXISTS csrf_tokens (

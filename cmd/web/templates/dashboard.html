@@ -3,19 +3,43 @@
 {{define "title"}}GProject - Dashboard{{end}}
 
 {{define "content"}}
+<!-- Navigation tabs -->
+<div class="border-b border-gray-200 mb-6">
+    <nav class="-mb-px flex space-x-8">
+        <a href="/dashboard" class="border-b-2 border-blue-500 py-2 px-1 text-sm font-medium text-blue-600">
+            Dashboard
+        </a>
+        <a href="/issues" class="border-b-2 border-transparent py-2 px-1 text-sm font-medium text-gray-500 hover:text-gray-700 hover:border-gray-300">
+            Issues
+        </a>
+    </nav>
+</div>
+
 <div class="bg-white shadow rounded-lg p-6">
     <h1 class="text-2xl font-bold mb-4">Dashboard</h1>
     
     {{if .User}}
         <div class="mb-6">
-            <div class="flex items-center gap-4">
-                <button hx-post="/sync" 
-                        hx-target="#sync-status"
-                        hx-swap="innerHTML"
-                        hx-headers='{"X-CSRF-Token": "{{.CSRFToken}}"}'
-                        class="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 transition">
-                    Sync with GitHub Issues
-                </button>
+            <div class="flex items-center justify-between">
+                <div class="flex items-center gap-4">
+                    <button hx-post="/sync" 
+                            hx-target="#sync-status"
+                            hx-swap="innerHTML"
+                            hx-indicator="#sync-indicator"
+                            hx-headers='{"X-CSRF-Token": "{{.CSRFToken}}"}'
+                            class="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 transition flex items-center gap-2">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                        </svg>
+                        Sync with GitHub
+                    </button>
+                    <span id="sync-indicator" class="htmx-indicator">
+                        <svg class="animate-spin h-5 w-5 text-blue-500" fill="none" viewBox="0 0 24 24">
+                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                    </span>
+                </div>
                 <div class="text-sm text-gray-600">
                     Repository: {{.RepoOwner}}/{{.RepoName}}
                 </div>
@@ -41,10 +65,17 @@
         <div class="border-t pt-4">
             <h2 class="text-lg font-semibold mb-2">Quick Actions</h2>
             <div class="flex gap-4">
-                <button onclick="location.reload()" class="text-blue-600 hover:text-blue-800">
-                    Refresh Stats
+                <a href="/issues" class="text-blue-600 hover:text-blue-800">
+                    View All Issues
+                </a>
+                <button hx-get="/api/sync/status" 
+                        hx-target="#last-sync-info"
+                        hx-trigger="load, every 30s"
+                        class="text-blue-600 hover:text-blue-800">
+                    Check Sync Status
                 </button>
             </div>
+            <div id="last-sync-info" class="mt-2 text-sm text-gray-500"></div>
         </div>
         
         {{if gt .Stats.TotalIssues 0}}
@@ -67,12 +98,39 @@
 </div>
 
 <script>
-    // Auto-refresh sync status
+    // Handle sync completion
     document.body.addEventListener('htmx:afterRequest', function(event) {
-        if (event.detail.target.id === 'sync-status') {
-            setTimeout(() => {
-                location.reload();
-            }, 3000);
+        if (event.detail.target.id === 'sync-status' && event.detail.successful) {
+            // Show success message
+            const syncStatus = document.getElementById('sync-status');
+            if (!syncStatus.innerHTML.includes('Error')) {
+                syncStatus.innerHTML = '<div class="text-green-600 font-medium">Sync completed successfully!</div>';
+                // Refresh stats after successful sync
+                setTimeout(() => {
+                    location.reload();
+                }, 2000);
+            }
+        }
+    });
+    
+    // Format sync status response
+    document.body.addEventListener('htmx:beforeSwap', function(event) {
+        if (event.detail.target.id === 'last-sync-info') {
+            try {
+                const data = JSON.parse(event.detail.xhr.responseText);
+                let statusHtml = '';
+                if (data.last_sync) {
+                    const lastSync = new Date(data.last_sync);
+                    statusHtml = `Last sync: ${lastSync.toLocaleString()}`;
+                }
+                if (data.is_syncing) {
+                    statusHtml += ' <span class="text-blue-600">(Syncing now...)</span>';
+                }
+                event.detail.target.innerHTML = statusHtml || 'Never synced';
+                event.preventDefault();
+            } catch (e) {
+                // If not JSON, let it swap normally
+            }
         }
     });
 </script>

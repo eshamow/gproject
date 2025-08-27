@@ -6,6 +6,17 @@
     <title>{{block "title" .}}GProject - GitHub Issues Frontend{{end}}</title>
     <script src="https://unpkg.com/htmx.org@1.9.10"></script>
     <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .htmx-indicator {
+            display: none;
+        }
+        .htmx-request .htmx-indicator {
+            display: inline-block;
+        }
+        .htmx-request.htmx-indicator {
+            display: inline-block;
+        }
+    </style>
 </head>
 <body class="bg-gray-50">
     <nav class="bg-white shadow">

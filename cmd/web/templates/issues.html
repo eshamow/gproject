@@ -1,0 +1,222 @@
+{{template "base.html" .}}
+
+{{define "title"}}GProject - Issues{{end}}
+
+{{define "content"}}
+<!-- Navigation tabs -->
+<div class="border-b border-gray-200 mb-6">
+    <nav class="-mb-px flex space-x-8">
+        <a href="/dashboard" class="border-b-2 border-transparent py-2 px-1 text-sm font-medium text-gray-500 hover:text-gray-700 hover:border-gray-300">
+            Dashboard
+        </a>
+        <a href="/issues" class="border-b-2 border-blue-500 py-2 px-1 text-sm font-medium text-blue-600">
+            Issues
+        </a>
+    </nav>
+</div>
+
+<div class="bg-white shadow rounded-lg">
+    <div class="p-6 border-b border-gray-200">
+        <div class="flex justify-between items-center">
+            <h1 class="text-2xl font-bold">Issues</h1>
+            <div class="flex items-center gap-4">
+                <!-- Search box -->
+                <div class="relative">
+                    <input type="text" 
+                           id="search-input"
+                           placeholder="Search issues..." 
+                           class="w-64 px-4 py-2 pl-10 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           hx-get="/api/issues/search"
+                           hx-trigger="keyup changed delay:500ms"
+                           hx-target="#issues-list"
+                           hx-indicator="#search-indicator"
+                           name="q">
+                    <svg class="absolute left-3 top-2.5 w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+                    </svg>
+                    <span id="search-indicator" class="htmx-indicator absolute right-3 top-3">
+                        <svg class="animate-spin h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24">
+                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                    </span>
+                </div>
+                
+                <!-- State filter -->
+                <select id="state-filter" 
+                        class="px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        hx-get="/api/issues"
+                        hx-trigger="change"
+                        hx-target="#issues-list"
+                        hx-include="#search-input"
+                        name="state">
+                    <option value="all">All Issues</option>
+                    <option value="open" selected>Open</option>
+                    <option value="closed">Closed</option>
+                </select>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Issues list with HTMX loading -->
+    <div id="issues-list" 
+         hx-get="/api/issues?state=open" 
+         hx-trigger="load"
+         hx-indicator="#loading-indicator">
+        <div id="loading-indicator" class="p-8 text-center">
+            <svg class="animate-spin h-8 w-8 text-blue-500 mx-auto" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            <p class="mt-2 text-gray-500">Loading issues...</p>
+        </div>
+    </div>
+</div>
+
+<!-- Pagination will be inserted here by HTMX -->
+<div id="pagination" class="mt-4"></div>
+
+<script>
+    // Format the API response into HTML
+    document.body.addEventListener('htmx:beforeSwap', function(event) {
+        if (event.detail.target.id === 'issues-list') {
+            try {
+                const response = JSON.parse(event.detail.xhr.responseText);
+                let html = '';
+                
+                if (response.issues && response.issues.length > 0) {
+                    html = '<div class="divide-y divide-gray-200">';
+                    response.issues.forEach(issue => {
+                        const stateClass = issue.state === 'open' ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800';
+                        const updatedAt = new Date(issue.updated_at).toLocaleDateString();
+                        
+                        html += `
+                            <div class="p-4 hover:bg-gray-50 transition">
+                                <div class="flex items-start justify-between">
+                                    <div class="flex-1">
+                                        <div class="flex items-center gap-2 mb-1">
+                                            <a href="${issue.html_url}" target="_blank" class="text-lg font-medium text-blue-600 hover:text-blue-800">
+                                                ${escapeHtml(issue.title)}
+                                            </a>
+                                            <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${stateClass}">
+                                                ${issue.state}
+                                            </span>
+                                        </div>
+                                        <div class="text-sm text-gray-600">
+                                            #${issue.number} opened by ${escapeHtml(issue.author || 'unknown')}
+                                            <span class="mx-1">•</span>
+                                            Updated ${updatedAt}
+                                            ${issue.comments > 0 ? `<span class="mx-1">•</span> ${issue.comments} comment${issue.comments !== 1 ? 's' : ''}` : ''}
+                                        </div>
+                                        ${issue.body ? `<div class="mt-2 text-sm text-gray-700 line-clamp-2">${escapeHtml(issue.body.substring(0, 200))}${issue.body.length > 200 ? '...' : ''}</div>` : ''}
+                                        ${issue.labels && issue.labels.length > 0 ? `
+                                            <div class="mt-2 flex flex-wrap gap-1">
+                                                ${issue.labels.split(',').map(label => 
+                                                    `<span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800">
+                                                        ${escapeHtml(label.trim())}
+                                                    </span>`
+                                                ).join('')}
+                                            </div>
+                                        ` : ''}
+                                    </div>
+                                    <div class="ml-4">
+                                        <a href="${issue.html_url}" target="_blank" class="text-gray-400 hover:text-gray-600">
+                                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path>
+                                            </svg>
+                                        </a>
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                    });
+                    html += '</div>';
+                    
+                    // Add pagination
+                    if (response.total > response.issues.length) {
+                        const totalPages = Math.ceil(response.total / (response.per_page || 20));
+                        const currentPage = response.page || 1;
+                        
+                        let paginationHtml = '<div class="flex justify-center gap-2 mt-4">';
+                        
+                        // Previous button
+                        if (currentPage > 1) {
+                            paginationHtml += `<button hx-get="/api/issues?page=${currentPage - 1}" hx-target="#issues-list" hx-include="#state-filter,#search-input" class="px-3 py-1 border rounded hover:bg-gray-100">Previous</button>`;
+                        }
+                        
+                        // Page numbers
+                        for (let i = 1; i <= Math.min(totalPages, 5); i++) {
+                            const activeClass = i === currentPage ? 'bg-blue-500 text-white' : 'hover:bg-gray-100';
+                            paginationHtml += `<button hx-get="/api/issues?page=${i}" hx-target="#issues-list" hx-include="#state-filter,#search-input" class="px-3 py-1 border rounded ${activeClass}">${i}</button>`;
+                        }
+                        
+                        // Next button
+                        if (currentPage < totalPages) {
+                            paginationHtml += `<button hx-get="/api/issues?page=${currentPage + 1}" hx-target="#issues-list" hx-include="#state-filter,#search-input" class="px-3 py-1 border rounded hover:bg-gray-100">Next</button>`;
+                        }
+                        
+                        paginationHtml += '</div>';
+                        document.getElementById('pagination').innerHTML = paginationHtml;
+                        htmx.process(document.getElementById('pagination'));
+                    } else {
+                        document.getElementById('pagination').innerHTML = '';
+                    }
+                } else {
+                    html = `
+                        <div class="p-8 text-center">
+                            <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                            </svg>
+                            <h3 class="mt-2 text-sm font-medium text-gray-900">No issues found</h3>
+                            <p class="mt-1 text-sm text-gray-500">
+                                ${response.total === 0 ? 'Try syncing with GitHub first.' : 'Try adjusting your search or filters.'}
+                            </p>
+                            <div class="mt-6">
+                                <a href="/dashboard" class="text-blue-600 hover:text-blue-800">
+                                    Go to Dashboard
+                                </a>
+                            </div>
+                        </div>
+                    `;
+                    document.getElementById('pagination').innerHTML = '';
+                }
+                
+                event.detail.target.innerHTML = html;
+                event.preventDefault();
+                
+                // Re-initialize HTMX on the new content
+                htmx.process(event.detail.target);
+            } catch (e) {
+                console.error('Error parsing response:', e);
+                event.detail.target.innerHTML = `
+                    <div class="p-8 text-center text-red-600">
+                        <p>Error loading issues. Please try again.</p>
+                    </div>
+                `;
+                event.preventDefault();
+            }
+        }
+    });
+    
+    // Helper function to escape HTML
+    function escapeHtml(text) {
+        if (!text) return '';
+        const map = {
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#039;'
+        };
+        return text.replace(/[&<>"']/g, m => map[m]);
+    }
+    
+    // Update state filter to include search when filtering
+    document.getElementById('state-filter').addEventListener('change', function() {
+        const searchValue = document.getElementById('search-input').value;
+        if (searchValue) {
+            // The hx-include will handle including the search input
+        }
+    });
+</script>
+{{end}}

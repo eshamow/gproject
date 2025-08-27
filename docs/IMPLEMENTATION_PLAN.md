@@ -4,9 +4,35 @@
 **Approach**: Start simple, iterate fast, defer complexity until proven necessary.
 **Reality Check**: One developer. Limited time. Ship working software, not perfect architecture.
 
+## Core Philosophy: Foundation Hygiene vs Premature Optimization
+
+**Foundation Hygiene** (Do from Day 1):
+- Security: CSRF, secure sessions, SQL injection prevention
+- Data integrity: Constraints, transactions, proper error handling  
+- User trust: Auth that works, sessions that persist, errors that help
+- These are like using seatbelts - not optional, not negotiable
+
+**Premature Optimization** (Defer until needed):
+- Abstractions: Repository patterns, dependency injection
+- Performance: Caching, connection pooling, query optimization
+- Scale: Microservices, message queues, load balancers
+- These are like adding a turbocharger - nice, but not for your first car
+
+**The Litmus Test**: Will deferring this make users vulnerable, lose data, or lose trust? If yes, do it now. Otherwise, it can wait.
+
 ## Quick Start (Day 1)
 
 **Goal**: Have a working web app with GitHub OAuth in 4 hours.
+
+**Day 1 Foundation Checklist**:
+✅ Secure session management (not optional)
+✅ CSRF protection (not optional)
+✅ Environment variables for secrets (not optional)
+✅ Parameterized SQL queries (not optional)
+✅ Basic error handling (not optional)
+❌ Repository pattern (defer)
+❌ Perfect test coverage (defer)
+❌ Docker setup (defer)
 
 ### Step 1: Project Setup (30 minutes)
 
@@ -489,10 +515,21 @@ func generateRandomString(length int) string {
 By end of Day 1, you have:
 - ✅ Working web server
 - ✅ GitHub OAuth login with proper CSRF protection
-- ✅ SQLite database with users/sessions
-- ✅ Basic UI with Tailwind
+- ✅ Secure session management (httpOnly, secure, sameSite cookies)
+- ✅ SQLite database with proper constraints and transactions
+- ✅ Basic UI with Tailwind (can be ugly, must be secure)
 - ✅ HTMX for interactivity
-- ✅ Project structure established
+- ✅ Error handling that doesn't leak sensitive info
+- ✅ Project structure established (simple is fine)
+
+**What Day 1 is NOT**:
+- ❌ Perfectly architected (single main.go is fine)
+- ❌ Fully tested (add tests when bugs appear)
+- ❌ Production-optimized (but security-ready)
+- ❌ Feature-complete (but foundation-complete)
+
+**The Day 1 Principle**: 
+It's okay if it's ugly, slow, or monolithic. It's NOT okay if it's insecure, loses data, or breaks user trust. Ship fast doesn't mean ship carelessly.
 
 **Run it now:**
 ```bash
@@ -1760,11 +1797,34 @@ Track these from day 1:
 ## Pragmatic Principles Applied
 
 1. **Ship Early**: Working OAuth + issue list by Day 1
-2. **Iterate Based on Usage**: Don't build features users don't need
-3. **Boring Technology**: Go, SQLite, HTMX - all proven, stable
-4. **Monolith First**: Don't distribute until you must
-5. **GitHub as Source**: Don't replicate GitHub's features
-6. **Progressive Enhancement**: SSE/webhooks enhance but aren't required
-7. **Operational Simplicity**: Single binary, single database file
+2. **Ship Secure**: CSRF, sessions, validation from Day 1 (not later)
+3. **Iterate Based on Usage**: Don't build features users don't need
+4. **Boring Technology**: Go, SQLite, HTMX - all proven, stable
+5. **Monolith First**: Don't distribute until you must
+6. **GitHub as Source**: Don't replicate GitHub's features
+7. **Progressive Enhancement**: SSE/webhooks enhance but aren't required
+8. **Operational Simplicity**: Single binary, single database file
 
-Remember: **The goal is to ship value, not build the perfect architecture.** This plan gets you from zero to production in 6 weeks with a maintainable, extensible codebase that can grow with your needs.
+## The Golden Rules
+
+### Always Do From Day 1
+- **Security hygiene**: Like washing your hands, just do it
+- **Data integrity**: Constraints and transactions aren't optional
+- **User basics**: Auth, sessions, and error handling that works
+- **Code hygiene**: Parameterized queries, environment variables
+
+### Defer Until Proven Necessary
+- **Abstractions**: Let patterns emerge from real code
+- **Optimizations**: Measure first, optimize second
+- **Architecture**: Monolith until it hurts
+- **Testing**: Test the paths users actually use
+
+### The 300-Line Rule
+If 300 lines of code protects 100% of your users (like CSRF protection), that's not premature optimization - that's doing your job. If 300 lines of code makes the app 10% faster for power users, that can wait.
+
+### Never Debate Working Security Code
+The real productivity killer isn't writing security code - it's debating whether to remove it. If security is working, leave it alone and move on.
+
+Remember: **"Ship fast" means skip the unnecessary, not the essential.** Security, data integrity, and user trust are essential from Day 1. Everything else can iterate.
+
+This plan gets you from zero to production in 6 weeks with a secure, maintainable, extensible codebase that grows with your needs without compromising user safety.

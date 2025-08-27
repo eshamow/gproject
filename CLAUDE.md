@@ -12,6 +12,7 @@ This is a GitHub Issues frontend that adds product management features (epics, t
 2. **SQLite First**: Use embedded SQLite, not PostgreSQL. Single-writer pattern (sync process) is a feature, not a limitation.
 3. **No Build Pipeline**: HTMX + Alpine.js via CDN. No npm, webpack, or frontend build tools initially.
 4. **Ship Weekly**: Each week must deliver working, visible features. Infrastructure can wait.
+5. **Foundation Hygiene**: Security, data integrity, and user trust are NOT premature optimization. Do these right from day 1.
 
 ## Key Commands
 
@@ -83,7 +84,32 @@ Add tables incrementally as features require them.
 - Real-time: GitHub webhooks for instant updates
 - Conflict resolution: GitHub is always source of truth
 
-## What NOT to Do (Yet)
+## Foundation Hygiene vs Premature Optimization
+
+### Do From Day 1 (Foundation Hygiene)
+These are NOT premature optimization - they're doing things right the first time:
+
+1. **Security Basics**:
+   - CSRF protection (300 lines protects 100% of users)
+   - Secure session management with httpOnly, secure cookies
+   - Input validation and output escaping
+   - Parameterized SQL queries (NEVER concatenate)
+   - Environment variables for secrets
+   - Rate limiting for external API calls
+
+2. **Data Integrity**:
+   - Foreign key constraints in database
+   - Transactions for multi-step operations
+   - Proper error handling with context
+   - Audit logging for important operations
+
+3. **User Trust**:
+   - Clear error messages
+   - Graceful degradation
+   - Loading states for async operations
+   - Consistent UI feedback
+
+### Defer Until Needed (Premature Optimization)
 
 1. **No microservices** - Monolith until 10K+ users
 2. **No Kubernetes** - systemd or Docker Compose is fine
@@ -92,6 +118,8 @@ Add tables incrementally as features require them.
 5. **No ORMs** - Direct SQL with parameterized queries
 6. **No dependency injection frameworks** - Go's simplicity is the feature
 7. **No extensive testing initially** - Ship first, test what breaks
+8. **No caching layer** - Until you measure the need
+9. **No message queues** - Goroutines and channels first
 
 ## File Structure (Build Incrementally)
 
@@ -130,13 +158,50 @@ Grow to (only when needed):
 - Batch GitHub API requests using GraphQL
 - Run sync operations in background goroutines
 
+## Decision Framework: Should I Add This Now?
+
+When facing a "should I add this?" decision, ask:
+
+1. **Is it security?** → YES, add it now
+   - Example: CSRF tokens, secure cookies, input validation
+   - Why: Security debt compounds exponentially
+
+2. **Does it protect data integrity?** → YES, add it now
+   - Example: Database constraints, transactions, proper error handling
+   - Why: Corrupted data is harder to fix than missing features
+
+3. **Will removing it later break user trust?** → YES, add it now
+   - Example: Session management, audit logs, graceful error handling
+   - Why: User trust is expensive to rebuild
+
+4. **Is it an abstraction for future flexibility?** → NO, defer it
+   - Example: Repository pattern, dependency injection, plugin system
+   - Why: YAGNI - patterns will emerge from real usage
+
+5. **Is it an optimization?** → NO, defer it
+   - Example: Caching, database pooling, query optimization
+   - Why: Optimize after measuring, not before
+
+6. **Is it a nice-to-have feature?** → NO, defer it
+   - Example: Dark mode, keyboard shortcuts, advanced filters
+   - Why: Ship core value first
+
 ## Common Pitfalls
 
-1. **Overengineering early**: 40+ files before first feature ships
-2. **PostgreSQL complexity**: SQLite is perfect for this use case
-3. **Frontend build pipeline**: HTMX + CDN works great initially
-4. **Perfect tests**: Ship first, test what users actually use
+### Under-engineering (Shipping Carelessly)
+1. **No CSRF protection**: "It's just an MVP" → Data loss, user compromise
+2. **Storing passwords in plain text**: "We'll fix it later" → Never acceptable
+3. **SQL injection vulnerabilities**: "We trust our users" → You shouldn't
+4. **No error handling**: "It works on my machine" → It won't in production
+5. **No session management**: "We'll add it when we scale" → Users hate re-logging in
+
+### Over-engineering (Shipping Never)
+1. **40+ files before first feature ships**: Perfect architecture, no users
+2. **PostgreSQL for read-heavy workload**: SQLite handles millions of reads
+3. **Frontend build pipeline**: HTMX + CDN ships today
+4. **100% test coverage before launch**: Ship first, test what breaks
 5. **Premature abstraction**: Duplicate code until patterns emerge
+6. **Debating whether to remove working security code**: The real productivity trap
 
 ## When to Add Complexity
 
@@ -146,6 +211,32 @@ Only add when you measure the need:
 - **Docker**: When deployment gets painful (not before)
 - **Tests**: After users report bugs (test those paths)
 - **Monitoring**: When you have users to monitor
+- **Abstractions**: When you've written the same code 3+ times
+- **Microservices**: When team boundaries require it
+- **API versioning**: When you have external consumers
+- **Feature flags**: When you need gradual rollouts
+
+## The Pragmatic Balance
+
+**Ship fast** means:
+- Skip unnecessary abstractions
+- Use boring technology
+- Deploy monoliths
+- Write SQL directly
+- Use server-side rendering
+
+**Ship fast** does NOT mean:
+- Skip security basics
+- Ignore data integrity  
+- Break user trust
+- Create technical debt you'll pay for in weeks (not months)
+- Debate removing working security code
+
+**Remember**: There's a huge difference between:
+- "We'll add security later" (NEVER OK)
+- "We'll add caching later" (TOTALLY OK)
+
+The first is irresponsible. The second is pragmatic.
 
 ## References
 

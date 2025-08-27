@@ -734,8 +734,12 @@ func (app *App) securityHeaders(next http.Handler) http.Handler {
 			"object-src 'none'; " +
 			"base-uri 'self'; " +
 			"form-action 'self'; " +
-			"frame-ancestors 'none'; " +
-			"upgrade-insecure-requests"
+			"frame-ancestors 'none'"
+		
+		// Only upgrade to HTTPS in production
+		if app.config.Environment == "production" {
+			csp += "; upgrade-insecure-requests"
+		}
 		w.Header().Set("Content-Security-Policy", csp)
 		
 		// Strict Transport Security (only in production)

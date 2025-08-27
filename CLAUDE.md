@@ -84,6 +84,96 @@ Add tables incrementally as features require them.
 - Real-time: GitHub webhooks for instant updates
 - Conflict resolution: GitHub is always source of truth
 
+## Pragmatic Testing Strategy
+
+### Foundation Tests (Day 1 Essentials)
+
+These tests are NOT premature optimization - they're foundation hygiene:
+
+1. **Authentication Flow** - Test the complete OAuth cycle:
+   ```go
+   // Must test: token exchange, session creation, CSRF protection
+   TestGitHubOAuthFlow()
+   TestSessionSecurity() 
+   TestCSRFProtection()
+   ```
+
+2. **Data Integrity** - Test critical database operations:
+   ```go
+   // Must test: GitHub data sync doesn't lose/corrupt issues
+   TestIssueSyncCreatesCorrectly()
+   TestIssueSyncUpdatesWithoutDataLoss()
+   TestConcurrentSyncSafety()
+   ```
+
+3. **Security Boundaries** - Test authorization and input validation:
+   ```go
+   // Must test: users can't access others' data
+   TestUserDataIsolation()
+   TestSQLInjectionPrevention()
+   TestXSSProtection()
+   ```
+
+### Incremental Test Evolution
+
+**When to Add Tests:**
+- **Immediately**: After any user-reported bug (test the exact failure case)
+- **Before Refactoring**: Add tests for code you're about to change
+- **Pattern Emergence**: When you duplicate logic 3+ times, test the abstraction
+- **Weekly Review**: Add one test for whatever broke/worried you most that week
+
+**The "Test What Broke" Principle:**
+```go
+// Week 1: User reports login fails with special characters in state
+// ADD THIS TEST IMMEDIATELY:
+func TestOAuthStateWithSpecialChars(t *testing.T) {
+    // Test the EXACT scenario that failed
+}
+
+// Week 2: Sync corrupts issue descriptions with emoji
+// ADD THIS TEST IMMEDIATELY:
+func TestSyncHandlesEmojiInDescriptions(t *testing.T) {
+    // Test the EXACT data that caused corruption
+}
+```
+
+### Testing Anti-patterns to Avoid
+
+❌ **DON'T** write these tests initially:
+- Unit tests for simple getters/setters
+- Mock-heavy tests that test mocks, not behavior
+- Edge cases that require complex setup for unlikely scenarios
+- Performance tests before you have performance problems
+- Integration tests for every possible user path
+
+✅ **DO** write these tests:
+- One happy-path test for each critical user journey
+- Tests for any security boundary
+- Tests for data integrity operations
+- Regression tests for actual bugs
+
+### Testing Confidence Framework
+
+**Minimum Viable Test Coverage for Shipping:**
+1. Can a user log in? (one test)
+2. Does sync preserve GitHub data? (one test)
+3. Are users' data isolated? (one test)
+4. Do the 3 main user journeys work? (three smoke tests)
+
+That's it. Six tests and you can ship Week 1.
+
+**When You Have "Enough" Tests:**
+- You can deploy without manually testing everything
+- You can refactor without fear of breaking core functionality
+- Bug reports decrease week-over-week
+- Tests run in < 30 seconds
+
+**Stop Writing Tests When:**
+- You're testing implementation details, not behavior
+- The test setup is more complex than the code being tested
+- You're at 80% coverage of critical paths (not total coverage)
+- It's Thursday and you haven't shipped this week's feature
+
 ## Foundation Hygiene vs Premature Optimization
 
 ### Do From Day 1 (Foundation Hygiene)
@@ -108,6 +198,12 @@ These are NOT premature optimization - they're doing things right the first time
    - Graceful degradation
    - Loading states for async operations
    - Consistent UI feedback
+
+4. **Test Coverage for Foundation**:
+   - One test per security control (proves it works)
+   - One test per critical data operation (proves no corruption)
+   - One test per user-facing error condition (proves graceful failure)
+   - Total: ~10-15 tests for rock-solid foundation
 
 ### Defer Until Needed (Premature Optimization)
 
@@ -143,12 +239,14 @@ Grow to (only when needed):
 
 ## Security Essentials
 
-- Always use parameterized SQL queries
+- Always use parameterized SQL queries (TEST THIS)
 - Store secrets in environment variables
-- Use CSRF tokens for state-changing operations
-- Validate webhook signatures from GitHub
+- Use CSRF tokens for state-changing operations (TEST THIS)
+- Validate webhook signatures from GitHub (TEST THIS)
 - Escape output in templates (Go does this by default)
-- Use secure session cookies (httpOnly, secure, sameSite)
+- Use secure session cookies (httpOnly, secure, sameSite) (TEST THIS)
+
+**Security Testing Rule**: Every security control gets exactly ONE test that proves it works. No more, no less.
 
 ## Performance Guidelines
 
@@ -194,6 +292,8 @@ When facing a "should I add this?" decision, ask:
 3. **SQL injection vulnerabilities**: "We trust our users" → You shouldn't
 4. **No error handling**: "It works on my machine" → It won't in production
 5. **No session management**: "We'll add it when we scale" → Users hate re-logging in
+6. **Zero tests for security boundaries**: "Manual testing is enough" → Until it isn't
+7. **No tests for data integrity**: "The database handles it" → Data corruption is permanent
 
 ### Over-engineering (Shipping Never)
 1. **40+ files before first feature ships**: Perfect architecture, no users
@@ -202,6 +302,9 @@ When facing a "should I add this?" decision, ask:
 4. **100% test coverage before launch**: Ship first, test what breaks
 5. **Premature abstraction**: Duplicate code until patterns emerge
 6. **Debating whether to remove working security code**: The real productivity trap
+7. **Testing every edge case first**: "What if user submits 10MB of emoji?" → They won't
+8. **Mock objects everywhere**: Testing mocks instead of actual behavior
+9. **Test-driving simple CRUD**: 3 hours writing tests for 10 minutes of obvious code
 
 ## When to Add Complexity
 

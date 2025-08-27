@@ -20,6 +20,44 @@
 
 **The Litmus Test**: Will deferring this make users vulnerable, lose data, or lose trust? If yes, do it now. Otherwise, it can wait.
 
+## Testing Philosophy: Confidence Without Paralysis
+
+**Test for Confidence, Not Coverage**:
+- 6 foundation tests on Day 1 (security, data, critical path)
+- Add tests when bugs occur (test the exact failure)
+- Add tests before refactoring (preserve behavior)
+- Stop at ~40-60 total tests for this project size
+
+**The Testing Pyramid (Inverted for Speed)**:
+```
+        Integration Tests (6-10)
+       /                        \
+      Critical Path Tests (10-15) 
+     /                            \
+    Security & Data Tests (10-15)
+   /                              \
+  Unit Tests (only for complex logic)
+```
+
+**Test Timing Rules**:
+1. **Before Day 1 ships**: 6 foundation tests only
+2. **When a bug is found**: Add regression test immediately
+3. **Before refactoring**: Test the code you're changing
+4. **When worried**: Test what keeps you up at night
+5. **Never**: Test simple CRUD, getters/setters, or obvious code
+
+**Signs You Have Enough Tests**:
+- Deployment doesn't require manual testing
+- Refactoring doesn't cause anxiety
+- Bug reports decrease over time
+- All tests run in < 30 seconds
+
+**Signs You Have Too Many Tests**:
+- Tests test mocks, not behavior
+- Test setup is more complex than the code
+- Tests break when implementation (not behavior) changes
+- You spend more time fixing tests than features
+
 ## Quick Start (Day 1)
 
 **Goal**: Have a working web app with GitHub OAuth in 4 hours.
@@ -521,19 +559,49 @@ By end of Day 1, you have:
 - ✅ HTMX for interactivity
 - ✅ Error handling that doesn't leak sensitive info
 - ✅ Project structure established (simple is fine)
+- ✅ **6 Foundation Tests** (auth, session, CSRF, SQL injection, critical path, data integrity)
 
 **What Day 1 is NOT**:
 - ❌ Perfectly architected (single main.go is fine)
-- ❌ Fully tested (add tests when bugs appear)
+- ❌ Fully tested (just the 6 foundation tests)
 - ❌ Production-optimized (but security-ready)
 - ❌ Feature-complete (but foundation-complete)
 
 **The Day 1 Principle**: 
 It's okay if it's ugly, slow, or monolithic. It's NOT okay if it's insecure, loses data, or breaks user trust. Ship fast doesn't mean ship carelessly.
 
+**Day 1 Foundation Tests (Write these before shipping):**
+```go
+// /Users/eshamow/proj/gproject/cmd/web/main_test.go
+func TestOAuthFlowWorks(t *testing.T) {
+    // Test that users can complete GitHub OAuth
+}
+
+func TestSessionPersistence(t *testing.T) {
+    // Test that sessions survive server restart
+}
+
+func TestCSRFProtection(t *testing.T) {
+    // Test that state-changing operations require valid CSRF token
+}
+
+func TestSQLInjectionBlocked(t *testing.T) {
+    // Test that malicious input doesn't break queries
+}
+
+func TestCriticalPath(t *testing.T) {
+    // Test that users can login → sync → view issues
+}
+
+func TestDataIntegrity(t *testing.T) {
+    // Test that failed operations rollback correctly
+}
+```
+
 **Run it now:**
 ```bash
 go mod tidy
+go test ./... # Run your 6 foundation tests
 make run
 # Visit http://localhost:8080
 ```
@@ -1085,6 +1153,7 @@ func (s *Syncer) GetSyncStats(owner, repo string) (map[string]interface{}, error
 - ✅ Issue sync functionality
 - ✅ Issues list with search/filter
 - ✅ Basic UI working end-to-end
+- ✅ **Foundation Tests**: ~10-15 tests total covering critical paths
 
 ## Phase 2: GitHub Sync & Webhooks (Week 2)
 
@@ -1440,6 +1509,16 @@ if (Notification.permission === 'default') {
 - ✅ Real-time updates via SSE
 - ✅ Browser notifications for issue changes
 - ✅ Automatic UI updates without refresh
+- ✅ **Testing Additions**: +5-10 tests for webhook validation and sync integrity (20-25 total)
+- ✅ +5-10 tests for new critical paths
+
+**Week 2 Testing Additions:**
+- [ ] Test webhook data doesn't corrupt existing issues
+- [ ] Test concurrent sync operations don't conflict
+- [ ] Test incremental sync preserves all data
+- [ ] Test webhook signature validation
+- [ ] Regression tests for Week 2 bugs
+- [ ] Total: 20-25 tests cumulative
 
 ## Phase 3: Product Features (Week 3-4)
 
@@ -1596,7 +1675,30 @@ func (a *Analytics) GetLabelDistribution() ([]LabelCount, error) {
 
 ## Phase 4: Polish & Deploy (Week 5-6)
 
-### Week 5: Testing & Performance
+### Week 5: Testing Gaps & Performance
+
+**Focus: Fill testing gaps based on actual usage, not coverage metrics**
+
+**Priority Order for Adding Tests**:
+1. **User-reported bugs** - Test the exact failure case
+2. **Your worries** - Test what keeps you up at night
+3. **Refactoring targets** - Test before changing
+4. **Complex business logic** - Test calculations and rules
+5. **Never** - Don't test simple CRUD or framework code
+
+**Skip These Tests**:
+- Testing every edge case
+- Testing getter/setter methods
+- Testing the database itself
+- Testing third-party libraries
+- Testing UI appearance
+
+**Performance Testing Only If**:
+- Users complain about speed
+- You measure and find a bottleneck
+- You're about to optimize something
+
+### Week 5: Pragmatic Testing Examples
 
 ```go
 // /Users/eshamow/proj/gproject/internal/app/app_test.go
@@ -1658,6 +1760,13 @@ func TestIssueSync(t *testing.T) {
         t.Errorf("Expected 1 issue, got %d", count)
     }
 }
+
+// By Week 5, you should have ~40-60 tests total:
+// - 6 foundation tests (Day 1)
+// - 10-20 feature tests (added during development)
+// - 10-20 regression tests (from bugs users found)
+// - 5-10 integration tests (for complex workflows)
+// - That's enough. Ship it.
 ```
 
 ### Week 6: Deployment
@@ -1812,6 +1921,7 @@ Track these from day 1:
 - **Data integrity**: Constraints and transactions aren't optional
 - **User basics**: Auth, sessions, and error handling that works
 - **Code hygiene**: Parameterized queries, environment variables
+- **Foundation tests**: 6 tests for security/data/critical paths
 
 ### Defer Until Proven Necessary
 - **Abstractions**: Let patterns emerge from real code
@@ -1822,9 +1932,38 @@ Track these from day 1:
 ### The 300-Line Rule
 If 300 lines of code protects 100% of your users (like CSRF protection), that's not premature optimization - that's doing your job. If 300 lines of code makes the app 10% faster for power users, that can wait.
 
+### The 30-Second Test Rule
+All tests should run in under 30 seconds. If they take longer:
+- Use test database fixtures, not full production data
+- Mock external API calls after testing them once
+- Run slow tests separately (mark with `// +build slow`)
+- Remember: Fast tests get run, slow tests get skipped
+
 ### Never Debate Working Security Code
 The real productivity killer isn't writing security code - it's debating whether to remove it. If security is working, leave it alone and move on.
 
-Remember: **"Ship fast" means skip the unnecessary, not the essential.** Security, data integrity, and user trust are essential from Day 1. Everything else can iterate.
+### Testing Confidence Checklist
 
-This plan gets you from zero to production in 6 weeks with a secure, maintainable, extensible codebase that grows with your needs without compromising user safety.
+**You're ready to ship when**:
+✅ OAuth flow has a test
+✅ Session security has a test
+✅ CSRF protection has a test
+✅ SQL injection prevention has a test
+✅ Critical user path has a test
+✅ Data integrity has a test
+✅ Any user-reported bugs have regression tests
+✅ Tests run in < 30 seconds
+✅ You can deploy without fear
+
+**You're NOT ready when**:
+❌ You have 100% coverage but no users
+❌ Tests break when refactoring
+❌ Test maintenance exceeds feature development
+❌ You're testing the framework instead of your code
+
+### Ship Thursday Rule
+If it's Thursday and you haven't shipped this week, stop writing tests and ship. You can add tests on Monday. Users can't use tests, they can use features.
+
+Remember: **"Ship fast" means skip the unnecessary, not the essential.** Security, data integrity, user trust, and foundation tests are essential from Day 1. Everything else can iterate.
+
+This plan gets you from zero to production in 6 weeks with a secure, maintainable, extensible codebase that grows with your needs without compromising user safety or developer confidence.

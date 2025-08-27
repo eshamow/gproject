@@ -12,6 +12,7 @@
                 <button hx-post="/sync" 
                         hx-target="#sync-status"
                         hx-swap="innerHTML"
+                        hx-headers='{"X-CSRF-Token": "{{.CSRFToken}}"}'
                         class="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 transition">
                     Sync with GitHub Issues
                 </button>

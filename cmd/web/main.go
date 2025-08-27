@@ -2,9 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"embed"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -12,6 +16,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -24,9 +29,50 @@ import (
 var templateFS embed.FS
 
 type App struct {
-	db     *sql.DB
-	tmpl   *template.Template
-	config Config
+	db          *sql.DB
+	tmpl        *template.Template
+	config      Config
+	rateLimiter *RateLimiter
+}
+
+// RateLimiter implements a simple in-memory rate limiter
+type RateLimiter struct {
+	attempts map[string][]time.Time
+	mu       sync.RWMutex
+}
+
+func NewRateLimiter() *RateLimiter {
+	return &RateLimiter{
+		attempts: make(map[string][]time.Time),
+	}
+}
+
+func (rl *RateLimiter) Allow(key string, limit int, window time.Duration) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	
+	now := time.Now()
+	cutoff := now.Add(-window)
+	
+	// Clean old attempts
+	if attempts, exists := rl.attempts[key]; exists {
+		var valid []time.Time
+		for _, t := range attempts {
+			if t.After(cutoff) {
+				valid = append(valid, t)
+			}
+		}
+		rl.attempts[key] = valid
+	}
+	
+	// Check limit
+	if len(rl.attempts[key]) >= limit {
+		return false
+	}
+	
+	// Add new attempt
+	rl.attempts[key] = append(rl.attempts[key], now)
+	return true
 }
 
 type Config struct {
@@ -88,9 +134,10 @@ func main() {
 	tmpl := template.Must(template.New("").ParseFS(templateFS, "templates/*.html"))
 
 	app := &App{
-		db:     db,
-		tmpl:   tmpl,
-		config: config,
+		db:          db,
+		tmpl:        tmpl,
+		config:      config,
+		rateLimiter: NewRateLimiter(),
 	}
 
 	// Setup routes
@@ -102,9 +149,15 @@ func main() {
 	mux.HandleFunc("/dashboard", app.requireAuth(app.handleDashboard))
 	mux.HandleFunc("/sync", app.requireAuth(app.handleSync))
 
+	// Wrap with security headers middleware
+	handler := app.securityHeaders(mux)
+
+	// Start background cleanup tasks
+	go app.cleanupExpiredSessions()
+
 	// Start server
 	log.Printf("Starting server on http://localhost:%s", config.Port)
-	log.Fatal(http.ListenAndServe(":"+config.Port, mux))
+	log.Fatal(http.ListenAndServe(":"+config.Port, handler))
 }
 
 func (app *App) handleHome(w http.ResponseWriter, r *http.Request) {
@@ -127,6 +180,12 @@ func (app *App) handleHome(w http.ResponseWriter, r *http.Request) {
 func (app *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	user := app.getCurrentUser(r)
 	
+	// Generate CSRF token for this session
+	var csrfToken string
+	if cookie, err := r.Cookie("session"); err == nil {
+		csrfToken = app.generateCSRFToken(cookie.Value)
+	}
+	
 	// Get stats from database
 	var stats struct {
 		TotalIssues  int
@@ -148,6 +207,7 @@ func (app *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		"Stats":     stats,
 		"RepoOwner": app.config.GitHubRepoOwner,
 		"RepoName":  app.config.GitHubRepoName,
+		"CSRFToken": csrfToken,
 	}
 
 	if err := app.tmpl.ExecuteTemplate(w, "dashboard.html", data); err != nil {
@@ -156,6 +216,17 @@ func (app *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
 }
 
 func (app *App) handleLogin(w http.ResponseWriter, r *http.Request) {
+	// Rate limit login attempts by IP
+	clientIP := r.RemoteAddr
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		clientIP = xff
+	}
+	
+	if !app.rateLimiter.Allow("login:"+clientIP, 10, 15*time.Minute) {
+		http.Error(w, "Too many login attempts. Please try again later.", http.StatusTooManyRequests)
+		return
+	}
+	
 	config := app.getOAuthConfig()
 	// Generate random state for CSRF protection
 	state := generateRandomString(32)
@@ -167,7 +238,8 @@ func (app *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		MaxAge:   600, // 10 minutes
 		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
+		SameSite: http.SameSiteLaxMode, // Keep Lax for OAuth flow
+		Secure:   app.config.Environment == "production",
 	})
 
 	url := config.AuthCodeURL(state, oauth2.AccessTypeOnline)
@@ -197,11 +269,16 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 	// Verify state for CSRF protection
 	stateCookie, err := r.Cookie("oauth_state")
 	if err != nil || stateCookie.Value != r.URL.Query().Get("state") {
+		log.Printf("OAuth state mismatch: cookie=%v, param=%v", stateCookie, r.URL.Query().Get("state"))
 		http.Error(w, "Invalid state parameter", http.StatusBadRequest)
 		return
 	}
 
 	code := r.URL.Query().Get("code")
+	if code == "" || len(code) > 256 {
+		http.Error(w, "Invalid authorization code", http.StatusBadRequest)
+		return
+	}
 	config := app.getOAuthConfig()
 
 	token, err := config.Exchange(context.Background(), code)
@@ -258,6 +335,13 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 		githubUser.Email = fmt.Sprintf("%s@users.noreply.github.com", githubUser.Login)
 	}
 
+	// Encrypt the access token before storing
+	encryptedToken, err := app.encryptToken(token.AccessToken)
+	if err != nil {
+		http.Error(w, "Failed to secure token", http.StatusInternalServerError)
+		return
+	}
+
 	// Create or update user in database
 	_, err = app.db.Exec(`
 		INSERT INTO users (email, github_id, github_login, name, avatar_url, access_token) 
@@ -269,7 +353,7 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 			avatar_url = excluded.avatar_url,
 			access_token = excluded.access_token
 	`, githubUser.Email, githubUser.ID, githubUser.Login,
-		githubUser.Name, githubUser.AvatarURL, token.AccessToken)
+		githubUser.Name, githubUser.AvatarURL, encryptedToken)
 
 	if err != nil {
 		http.Error(w, "Failed to save user", http.StatusInternalServerError)
@@ -296,14 +380,14 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Set session cookie
+	// Set session cookie with security best practices
 	http.SetCookie(w, &http.Cookie{
 		Name:     "session",
 		Value:    sessionID,
 		Path:     "/",
 		MaxAge:   7 * 24 * 60 * 60, // 7 days
 		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
+		SameSite: http.SameSiteStrictMode, // Changed to Strict for better CSRF protection
 		Secure:   app.config.Environment == "production",
 	})
 
@@ -330,11 +414,29 @@ func (app *App) handleSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get user's access token
-	var accessToken string
-	err := app.db.QueryRow("SELECT access_token FROM users WHERE id = ?", user.ID).Scan(&accessToken)
+	// Verify CSRF token
+	csrfToken := r.Header.Get("X-CSRF-Token")
+	if csrfToken == "" {
+		csrfToken = r.FormValue("csrf_token")
+	}
+	
+	if !app.validateCSRFToken(r, csrfToken) {
+		http.Error(w, "Invalid CSRF token", http.StatusForbidden)
+		return
+	}
+
+	// Get user's encrypted access token
+	var encryptedToken string
+	err := app.db.QueryRow("SELECT access_token FROM users WHERE id = ?", user.ID).Scan(&encryptedToken)
 	if err != nil {
 		w.Write([]byte(`<div class="text-red-600">Failed to get access token</div>`))
+		return
+	}
+
+	// Decrypt the access token
+	accessToken, err := app.decryptToken(encryptedToken)
+	if err != nil {
+		w.Write([]byte(`<div class="text-red-600">Failed to decrypt access token</div>`))
 		return
 	}
 
@@ -513,8 +615,171 @@ func mustGetEnv(key string) string {
 
 func generateRandomString(length int) string {
 	b := make([]byte, length)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Sprintf("Failed to generate random string: %v", err))
+	}
 	return hex.EncodeToString(b)
+}
+
+// encryptToken encrypts a token using AES-256-GCM
+func (app *App) encryptToken(plaintext string) (string, error) {
+	// Derive key from session secret
+	key := sha256.Sum256([]byte(app.config.SessionSecret))
+	
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		return "", err
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+
+	ciphertext := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
+	return base64.StdEncoding.EncodeToString(ciphertext), nil
+}
+
+// decryptToken decrypts a token encrypted with encryptToken
+func (app *App) decryptToken(ciphertext string) (string, error) {
+	data, err := base64.StdEncoding.DecodeString(ciphertext)
+	if err != nil {
+		return "", err
+	}
+
+	key := sha256.Sum256([]byte(app.config.SessionSecret))
+	
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		return "", err
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+
+	nonceSize := gcm.NonceSize()
+	if len(data) < nonceSize {
+		return "", fmt.Errorf("ciphertext too short")
+	}
+
+	nonce, ciphertextBytes := data[:nonceSize], data[nonceSize:]
+	plaintext, err := gcm.Open(nil, nonce, ciphertextBytes, nil)
+	if err != nil {
+		return "", err
+	}
+
+	return string(plaintext), nil
+}
+
+// generateCSRFToken creates a new CSRF token for the session
+func (app *App) generateCSRFToken(sessionID string) string {
+	token := generateRandomString(32)
+	// Store in database with expiration
+	app.db.Exec(`
+		INSERT OR REPLACE INTO csrf_tokens (session_id, token, expires_at)
+		VALUES (?, ?, datetime('now', '+1 hour'))
+	`, sessionID, token)
+	return token
+}
+
+// validateCSRFToken checks if the provided CSRF token is valid
+func (app *App) validateCSRFToken(r *http.Request, token string) bool {
+	if token == "" {
+		return false
+	}
+	
+	cookie, err := r.Cookie("session")
+	if err != nil {
+		return false
+	}
+	
+	var valid bool
+	err = app.db.QueryRow(`
+		SELECT COUNT(*) > 0 FROM csrf_tokens 
+		WHERE session_id = ? AND token = ? AND expires_at > datetime('now')
+	`, cookie.Value, token).Scan(&valid)
+	
+	return err == nil && valid
+}
+
+// securityHeaders adds security headers to all responses
+func (app *App) securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Prevent clickjacking attacks
+		w.Header().Set("X-Frame-Options", "DENY")
+		
+		// Prevent MIME type sniffing
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		
+		// Enable XSS protection (for older browsers)
+		w.Header().Set("X-XSS-Protection", "1; mode=block")
+		
+		// Referrer policy for privacy
+		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		
+		// Content Security Policy
+		csp := "default-src 'self'; " +
+			"script-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.tailwindcss.com; " +
+			"style-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com; " +
+			"img-src 'self' https://avatars.githubusercontent.com data:; " +
+			"connect-src 'self'; " +
+			"font-src 'self'; " +
+			"object-src 'none'; " +
+			"base-uri 'self'; " +
+			"form-action 'self'; " +
+			"frame-ancestors 'none'; " +
+			"upgrade-insecure-requests"
+		w.Header().Set("Content-Security-Policy", csp)
+		
+		// Strict Transport Security (only in production)
+		if app.config.Environment == "production" {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload")
+		}
+		
+		// Add request ID for tracing
+		requestID := r.Header.Get("X-Request-ID")
+		if requestID == "" {
+			requestID = generateRandomString(16)
+		}
+		w.Header().Set("X-Request-ID", requestID)
+		
+		next.ServeHTTP(w, r)
+	})
+}
+
+// cleanupExpiredSessions periodically removes expired sessions and tokens
+func (app *App) cleanupExpiredSessions() {
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+	
+	for range ticker.C {
+		// Clean expired sessions
+		result, err := app.db.Exec(`
+			DELETE FROM sessions WHERE expires_at < datetime('now')
+		`)
+		if err == nil {
+			if rows, _ := result.RowsAffected(); rows > 0 {
+				log.Printf("Cleaned up %d expired sessions", rows)
+			}
+		}
+		
+		// Clean expired CSRF tokens
+		result, err = app.db.Exec(`
+			DELETE FROM csrf_tokens WHERE expires_at < datetime('now')
+		`)
+		if err == nil {
+			if rows, _ := result.RowsAffected(); rows > 0 {
+				log.Printf("Cleaned up %d expired CSRF tokens", rows)
+			}
+		}
+	}
 }
 
 func runMigrations(db *sql.DB) {
@@ -568,6 +833,17 @@ func runMigrations(db *sql.DB) {
 	CREATE INDEX IF NOT EXISTS idx_issues_state ON issues(state);
 	CREATE INDEX IF NOT EXISTS idx_issues_number ON issues(number);
 	CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+
+	CREATE TABLE IF NOT EXISTS csrf_tokens (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		session_id TEXT NOT NULL,
+		token TEXT NOT NULL,
+		expires_at DATETIME NOT NULL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(session_id, token)
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_csrf_expires ON csrf_tokens(expires_at);
 	`
 
 	if _, err := db.Exec(schema); err != nil {

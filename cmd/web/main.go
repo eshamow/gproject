@@ -243,6 +243,7 @@ func (app *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	})
 
 	url := config.AuthCodeURL(state, oauth2.AccessTypeOnline)
+	log.Printf("OAuth Login: Redirecting to GitHub: %s", url)
 	http.Redirect(w, r, url, http.StatusTemporaryRedirect)
 }
 
@@ -266,6 +267,9 @@ func (app *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
+	log.Printf("OAuth Callback: URL=%s", r.URL.String())
+	log.Printf("OAuth Callback: Query params: code=%s, state=%s", r.URL.Query().Get("code"), r.URL.Query().Get("state"))
+	
 	// Verify state for CSRF protection
 	stateCookie, err := r.Cookie("oauth_state")
 	if err != nil || stateCookie.Value != r.URL.Query().Get("state") {
@@ -283,17 +287,21 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 	token, err := config.Exchange(context.Background(), code)
 	if err != nil {
+		log.Printf("OAuth ERROR: Failed to exchange code for token: %v", err)
 		http.Error(w, "Failed to exchange code for token", http.StatusInternalServerError)
 		return
 	}
+	log.Printf("OAuth: Successfully exchanged code for token")
 
 	// Get user info from GitHub API
 	client := config.Client(context.Background(), token)
 	resp, err := client.Get("https://api.github.com/user")
 	if err != nil {
+		log.Printf("OAuth ERROR: Failed to get user info: %v", err)
 		http.Error(w, "Failed to get user info", http.StatusInternalServerError)
 		return
 	}
+	log.Printf("OAuth: Successfully fetched user info from GitHub")
 	defer resp.Body.Close()
 
 	var githubUser struct {
@@ -343,6 +351,7 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create or update user in database
+	log.Printf("OAuth: Saving user to database - ID=%d, Login=%s, Email=%s", githubUser.ID, githubUser.Login, githubUser.Email)
 	_, err = app.db.Exec(`
 		INSERT INTO users (email, github_id, github_login, name, avatar_url, access_token) 
 		VALUES (?, ?, ?, ?, ?, ?)
@@ -356,9 +365,11 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 		githubUser.Name, githubUser.AvatarURL, encryptedToken)
 
 	if err != nil {
+		log.Printf("OAuth ERROR: Failed to save user to database: %v", err)
 		http.Error(w, "Failed to save user", http.StatusInternalServerError)
 		return
 	}
+	log.Printf("OAuth: User saved successfully")
 
 	// Get user ID
 	var userID int64
@@ -381,13 +392,15 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Set session cookie with security best practices
+	// IMPORTANT: Using SameSiteLaxMode for OAuth redirects to work properly
+	// Strict mode prevents cookies from being sent on redirects from external sites (GitHub)
 	http.SetCookie(w, &http.Cookie{
 		Name:     "session",
 		Value:    sessionID,
 		Path:     "/",
 		MaxAge:   7 * 24 * 60 * 60, // 7 days
 		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode, // Changed to Strict for better CSRF protection
+		SameSite: http.SameSiteLaxMode, // Lax mode allows cookies on top-level navigation
 		Secure:   app.config.Environment == "production",
 	})
 
@@ -399,6 +412,7 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 		MaxAge: -1,
 	})
 
+	log.Printf("OAuth: Login successful for user %s, redirecting to /dashboard", githubUser.Login)
 	http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
 }
 

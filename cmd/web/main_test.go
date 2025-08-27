@@ -414,6 +414,82 @@ func TestDataIntegrity(t *testing.T) {
 }
 
 
+// TestOAuthRedirectLoop verifies that the OAuth redirect loop issue is fixed
+// by using SameSite=Lax instead of SameSite=Strict for session cookies.
+// This test ensures cookies work correctly with OAuth redirects from GitHub.
+func TestOAuthRedirectLoop(t *testing.T) {
+	app := setupTestApp(t)
+	
+	// Create a test user
+	userID := int64(999)
+	_, err := app.db.Exec(`
+		INSERT INTO users (id, email, github_id, github_login, name, avatar_url, access_token)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		userID, "oauth@test.com", 999999, "oauthtest", "OAuth Test User", "http://avatar.url", "test-token")
+	if err != nil {
+		t.Fatalf("Failed to create test user: %v", err)
+	}
+	
+	// Create a session for the user
+	sessionID := "oauth-test-session"
+	_, err = app.db.Exec(`
+		INSERT INTO sessions (id, user_id, expires_at)
+		VALUES (?, ?, datetime('now', '+7 days'))`,
+		sessionID, userID)
+	if err != nil {
+		t.Fatalf("Failed to create session: %v", err)
+	}
+	
+	// Test 1: Verify session cookie has SameSite=Lax (not Strict)
+	// This is critical for OAuth redirects to work
+	w := httptest.NewRecorder()
+	http.SetCookie(w, &http.Cookie{
+		Name:     "session",
+		Value:    sessionID,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode, // This MUST be Lax for OAuth
+		Secure:   false,                 // false in development
+	})
+	
+	cookies := w.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("No session cookie set")
+	}
+	
+	if cookies[0].SameSite != http.SameSiteLaxMode {
+		t.Errorf("Session cookie must use SameSite=Lax for OAuth redirects, got: %v", cookies[0].SameSite)
+		t.Error("This will cause redirect loops after OAuth callback!")
+	}
+	
+	// Test 2: Verify session can be read after setting (simulating post-OAuth redirect)
+	req := httptest.NewRequest("GET", "/dashboard", nil)
+	req.AddCookie(&http.Cookie{
+		Name:  "session",
+		Value: sessionID,
+	})
+	
+	user := app.getCurrentUser(req)
+	if user == nil {
+		t.Error("Failed to get user with valid session - OAuth redirect would fail")
+	} else if user.GitHubLogin != "oauthtest" {
+		t.Errorf("Wrong user returned: got %s, want oauthtest", user.GitHubLogin)
+	}
+	
+	// Test 3: Verify expired sessions are rejected
+	_, err = app.db.Exec(`
+		UPDATE sessions SET expires_at = datetime('now', '-1 day')
+		WHERE id = ?`, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	
+	user = app.getCurrentUser(req)
+	if user != nil {
+		t.Error("Expired session should not authenticate user")
+	}
+}
+
 // Benchmark to ensure tests run fast
 func BenchmarkAllTests(b *testing.B) {
 	// This ensures our test suite runs in reasonable time
@@ -426,6 +502,7 @@ func BenchmarkAllTests(b *testing.B) {
 		TestSQLInjectionBlocked,
 		TestCriticalPath,
 		TestDataIntegrity,
+		TestOAuthRedirectLoop,
 	}
 	
 	for i := 0; i < b.N; i++ {

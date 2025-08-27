@@ -243,7 +243,11 @@ func (app *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	})
 
 	url := config.AuthCodeURL(state, oauth2.AccessTypeOnline)
-	log.Printf("OAuth Login: Redirecting to GitHub: %s", url)
+	if app.config.Environment != "production" {
+		log.Printf("OAuth Login: Redirecting to GitHub: %s", url)
+	} else {
+		log.Printf("OAuth Login: Initiating GitHub authentication")
+	}
 	http.Redirect(w, r, url, http.StatusTemporaryRedirect)
 }
 
@@ -267,13 +271,27 @@ func (app *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
-	log.Printf("OAuth Callback: URL=%s", r.URL.String())
-	log.Printf("OAuth Callback: Query params: code=%s, state=%s", r.URL.Query().Get("code"), r.URL.Query().Get("state"))
+	// Log callback details - reduce verbosity in production
+	if app.config.Environment != "production" {
+		code := r.URL.Query().Get("code")
+		state := r.URL.Query().Get("state")
+		// Only log first 6 chars of sensitive data
+		codePreview := "***"
+		if len(code) >= 6 {
+			codePreview = code[:6] + "..."
+		}
+		log.Printf("OAuth Callback: code=%s, state=%s...", codePreview, state[:8])
+	} else {
+		log.Printf("OAuth Callback: Processing authentication")
+	}
 	
 	// Verify state for CSRF protection
 	stateCookie, err := r.Cookie("oauth_state")
 	if err != nil || stateCookie.Value != r.URL.Query().Get("state") {
-		log.Printf("OAuth state mismatch: cookie=%v, param=%v", stateCookie, r.URL.Query().Get("state"))
+		if app.config.Environment != "production" {
+			log.Printf("OAuth state mismatch: cookie exists=%v, states match=%v", 
+				err == nil, stateCookie != nil && stateCookie.Value == r.URL.Query().Get("state"))
+		}
 		http.Error(w, "Invalid state parameter", http.StatusBadRequest)
 		return
 	}
@@ -291,7 +309,9 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to exchange code for token", http.StatusInternalServerError)
 		return
 	}
-	log.Printf("OAuth: Successfully exchanged code for token")
+	if app.config.Environment != "production" {
+		log.Printf("OAuth: Successfully exchanged code for token")
+	}
 
 	// Get user info from GitHub API
 	client := config.Client(context.Background(), token)
@@ -301,7 +321,9 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to get user info", http.StatusInternalServerError)
 		return
 	}
-	log.Printf("OAuth: Successfully fetched user info from GitHub")
+	if app.config.Environment != "production" {
+		log.Printf("OAuth: Successfully fetched user info from GitHub")
+	}
 	defer resp.Body.Close()
 
 	var githubUser struct {
@@ -351,7 +373,9 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create or update user in database
-	log.Printf("OAuth: Saving user to database - ID=%d, Login=%s, Email=%s", githubUser.ID, githubUser.Login, githubUser.Email)
+	if app.config.Environment != "production" {
+		log.Printf("OAuth: Saving user to database - Login=%s", githubUser.Login)
+	}
 	_, err = app.db.Exec(`
 		INSERT INTO users (email, github_id, github_login, name, avatar_url, access_token) 
 		VALUES (?, ?, ?, ?, ?, ?)
@@ -369,7 +393,9 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to save user", http.StatusInternalServerError)
 		return
 	}
-	log.Printf("OAuth: User saved successfully")
+	if app.config.Environment != "production" {
+		log.Printf("OAuth: User saved successfully")
+	}
 
 	// Get user ID
 	var userID int64
@@ -412,7 +438,11 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 		MaxAge: -1,
 	})
 
-	log.Printf("OAuth: Login successful for user %s, redirecting to /dashboard", githubUser.Login)
+	if app.config.Environment != "production" {
+		log.Printf("OAuth: Login successful for user %s, redirecting to /dashboard", githubUser.Login)
+	} else {
+		log.Printf("OAuth: Authentication completed successfully")
+	}
 	http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
 }
 

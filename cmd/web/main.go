@@ -566,23 +566,8 @@ func (app *App) handleSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get user's encrypted access token
-	var encryptedToken string
-	err := app.db.QueryRow("SELECT access_token FROM users WHERE id = ?", user.ID).Scan(&encryptedToken)
-	if err != nil {
-		w.Write([]byte(`<div class="text-red-600">Failed to get access token</div>`))
-		return
-	}
-
-	// Decrypt the access token
-	accessToken, err := app.decryptToken(encryptedToken)
-	if err != nil {
-		w.Write([]byte(`<div class="text-red-600">Failed to decrypt access token</div>`))
-		return
-	}
-
-	// Sync issues from GitHub
-	go app.syncIssues(accessToken)
+	// Trigger incremental sync (it will get the token itself)
+	go app.performIncrementalSync()
 
 	w.Write([]byte(`<div class="text-green-600">Sync started! Refresh the page in a few seconds to see updated data.</div>`))
 }
@@ -1419,23 +1404,50 @@ func (app *App) performIncrementalSync() {
 		return
 	}
 
-	// Get last sync time
-	var lastSync time.Time
+	// Get last sync time - the updated_at is stored as a string in Go's time format
+	var lastSyncStr sql.NullString
 	err = app.db.QueryRow(`
-		SELECT COALESCE(MAX(updated_at), datetime('1970-01-01'))
+		SELECT MAX(updated_at)
 		FROM issues
-	`).Scan(&lastSync)
+		WHERE updated_at IS NOT NULL AND updated_at != ''
+	`).Scan(&lastSyncStr)
 
-	if err != nil {
+	var lastSync time.Time
+	if err != nil || !lastSyncStr.Valid || lastSyncStr.String == "" {
+		log.Printf("No valid last sync time found (error: %v), starting from beginning", err)
 		lastSync = time.Unix(0, 0)
+	} else {
+		// Parse the time string - it's stored in Go's default format
+		lastSync, err = time.Parse("2006-01-02 15:04:05 -0700 MST", lastSyncStr.String)
+		if err != nil {
+			// Try RFC3339 format as fallback
+			lastSync, err = time.Parse(time.RFC3339, lastSyncStr.String)
+			if err != nil {
+				log.Printf("Error parsing last sync time '%s': %v, starting from beginning", lastSyncStr.String, err)
+				lastSync = time.Unix(0, 0)
+			}
+		}
+		if !lastSync.IsZero() {
+			log.Printf("Last sync time from DB: %s", lastSync.Format(time.RFC3339))
+		}
 	}
 
+	// Subtract 5 minutes from last sync to catch any concurrent updates
+	// GitHub's 'since' parameter is exclusive, so we need to go back a bit
+	// to ensure we don't miss issues updated at exactly the same time
+	originalLastSync := lastSync
+	lastSync = lastSync.Add(-5 * time.Minute)
+
 	// Prepare GitHub API request with incremental sync
+	// Use ascending order to process older updates first
 	since := lastSync.Format(time.RFC3339)
-	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues?state=all&sort=updated&direction=desc&since=%s&per_page=100",
+	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues?state=all&sort=updated&direction=asc&since=%s&per_page=100",
 		app.config.GitHubRepoOwner, app.config.GitHubRepoName, since)
 
-	log.Printf("Starting incremental sync since %s", since)
+	log.Printf("Starting incremental sync for repo %s/%s", app.config.GitHubRepoOwner, app.config.GitHubRepoName)
+	log.Printf("  Original last update: %s", originalLastSync.Format(time.RFC3339))
+	log.Printf("  Syncing since: %s (5 minutes before last update)", since)
+	log.Printf("  API URL: %s", apiURL)
 
 	// Create HTTP client with rate limiting awareness
 	client := &http.Client{Timeout: 30 * time.Second}
@@ -1481,23 +1493,49 @@ func (app *App) performIncrementalSync() {
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			log.Printf("GitHub API error: %d - %s", resp.StatusCode, string(body))
+			log.Printf("Request URL was: %s", pageURL)
+			app.syncStatus.mu.Lock()
+			app.syncStatus.Error = fmt.Sprintf("GitHub API error: %d", resp.StatusCode)
+			app.syncStatus.mu.Unlock()
+			break
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			log.Printf("Failed to read response body: %v", err)
 			break
 		}
 
 		var issues []map[string]interface{}
-		if err := json.NewDecoder(resp.Body).Decode(&issues); err != nil {
-			resp.Body.Close()
+		if err := json.Unmarshal(body, &issues); err != nil {
 			log.Printf("Failed to decode issues: %v", err)
+			log.Printf("Response body (first 500 chars): %s", string(body[:min(500, len(body))]))
 			break
 		}
-		resp.Body.Close()
 
 		if len(issues) == 0 {
+			log.Printf("No more issues to sync on page %d", page)
 			break // No more issues
+		}
+		
+		log.Printf("Processing %d issues from page %d", len(issues), page)
+		// Log first issue details for debugging
+		if len(issues) > 0 {
+			if number, ok := issues[0]["number"]; ok {
+				if updated, ok := issues[0]["updated_at"]; ok {
+					log.Printf("  First issue: #%.0f, updated: %v", number, updated)
+				}
+			}
 		}
 
 		// Store issues in database
 		for _, issue := range issues {
+			// Skip pull requests (they appear as issues in the API)
+			if _, isPR := issue["pull_request"]; isPR {
+				continue
+			}
+			
 			if err := app.storeIssue(issue); err != nil {
 				log.Printf("Failed to store issue: %v", err)
 				continue

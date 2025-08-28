@@ -20,34 +20,67 @@
     
     {{if .User}}
         <div class="mb-6">
-            <div class="flex items-center justify-between">
-                <div class="flex items-center gap-4">
-                    <button hx-post="/sync" 
-                            hx-target="#sync-status"
-                            hx-swap="innerHTML"
-                            hx-indicator="#sync-indicator"
-                            hx-headers='{"X-CSRF-Token": "{{.CSRFToken}}"}'
-                            class="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 transition flex items-center gap-2">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
-                        </svg>
-                        Sync with GitHub
-                    </button>
-                    <span id="sync-indicator" class="htmx-indicator">
-                        <svg class="animate-spin h-5 w-5 text-blue-500" fill="none" viewBox="0 0 24 24">
-                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                        </svg>
-                    </span>
+            <!-- Sync Control Panel -->
+            <div class="bg-gray-50 rounded-lg p-4 mb-4">
+                <div class="flex items-center justify-between mb-3">
+                    <div class="flex items-center gap-4">
+                        <button hx-post="/sync" 
+                                hx-target="#sync-status"
+                                hx-swap="innerHTML"
+                                hx-indicator="#sync-indicator"
+                                hx-headers='{"X-CSRF-Token": "{{.CSRFToken}}"}'
+                                class="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 transition flex items-center gap-2">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                            </svg>
+                            Sync with GitHub
+                        </button>
+                        <span id="sync-indicator" class="htmx-indicator">
+                            <svg class="animate-spin h-5 w-5 text-blue-500" fill="none" viewBox="0 0 24 24">
+                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                            </svg>
+                        </span>
+                        <!-- Auto-sync indicator -->
+                        <div class="flex items-center gap-2 text-sm text-gray-600">
+                            <svg class="w-4 h-4 text-green-500" fill="currentColor" viewBox="0 0 24 24">
+                                <circle cx="12" cy="12" r="3"/>
+                            </svg>
+                            <span>Auto-sync every 5 minutes</span>
+                        </div>
+                    </div>
+                    <div class="text-sm text-gray-600">
+                        Repository: {{.RepoOwner}}/{{.RepoName}}
+                    </div>
                 </div>
-                <div class="text-sm text-gray-600">
-                    Repository: {{.RepoOwner}}/{{.RepoName}}
+                
+                <!-- Live sync status display -->
+                <div id="sync-status-live" class="min-h-[2rem]"></div>
+                
+                <!-- Last sync time -->
+                <div class="flex items-center justify-between mt-2 pt-2 border-t border-gray-200">
+                    <span id="last-sync-time" class="text-sm text-gray-500">
+                        Loading sync status...
+                    </span>
+                    <div class="flex items-center gap-2">
+                        <span class="text-xs text-gray-500">Real-time updates:</span>
+                        <div id="sse-indicator" class="flex items-center gap-1">
+                            <div class="w-2 h-2 bg-gray-400 rounded-full animate-pulse"></div>
+                            <span class="text-xs text-gray-500">Connecting...</span>
+                        </div>
+                    </div>
                 </div>
             </div>
+            
             <div id="sync-status" class="mt-2"></div>
         </div>
         
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6"
+             id="dashboard-stats"
+             data-refresh-on-sync
+             hx-get="/api/dashboard-stats"
+             hx-trigger="refresh from:body"
+             hx-swap="innerHTML">
             <div class="bg-gray-50 p-4 rounded">
                 <div class="text-2xl font-bold">{{.Stats.TotalIssues}}</div>
                 <div class="text-gray-600">Total Issues</div>
@@ -132,6 +165,70 @@
                 // If not JSON, let it swap normally
             }
         }
+    });
+    
+    // Fetch and update last sync time periodically
+    function updateLastSyncTime() {
+        fetch('/api/sync/status')
+            .then(response => response.json())
+            .then(data => {
+                const element = document.getElementById('last-sync-time');
+                if (element && data.last_sync) {
+                    const date = new Date(data.last_sync);
+                    const now = new Date();
+                    const diffMs = now - date;
+                    const diffMins = Math.floor(diffMs / 60000);
+                    
+                    let timeStr;
+                    if (diffMins < 1) {
+                        timeStr = 'just now';
+                    } else if (diffMins < 60) {
+                        timeStr = `${diffMins} minute${diffMins > 1 ? 's' : ''} ago`;
+                    } else if (diffMins < 1440) {
+                        const hours = Math.floor(diffMins / 60);
+                        timeStr = `${hours} hour${hours > 1 ? 's' : ''} ago`;
+                    } else {
+                        timeStr = date.toLocaleString();
+                    }
+                    
+                    element.textContent = `Last sync: ${timeStr}`;
+                }
+            })
+            .catch(err => {
+                console.error('Failed to fetch sync status:', err);
+            });
+    }
+    
+    // Update on load and every 30 seconds
+    updateLastSyncTime();
+    setInterval(updateLastSyncTime, 30000);
+    
+    // Update SSE connection indicator
+    document.addEventListener('alpine:initialized', () => {
+        const updateSSEIndicator = () => {
+            const indicator = document.getElementById('sse-indicator');
+            if (!indicator) return;
+            
+            const rootElement = document.querySelector('[x-data]');
+            if (rootElement && rootElement.__x) {
+                const connected = rootElement.__x.$data.connected;
+                if (connected) {
+                    indicator.innerHTML = `
+                        <div class="w-2 h-2 bg-green-500 rounded-full"></div>
+                        <span class="text-xs text-green-600">Live</span>
+                    `;
+                } else {
+                    indicator.innerHTML = `
+                        <div class="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
+                        <span class="text-xs text-red-600">Reconnecting...</span>
+                    `;
+                }
+            }
+        };
+        
+        // Update indicator periodically
+        setInterval(updateSSEIndicator, 2000);
+        setTimeout(updateSSEIndicator, 500);
     });
 </script>
 {{end}}

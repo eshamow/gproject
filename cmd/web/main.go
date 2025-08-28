@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -13,9 +14,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -35,6 +38,9 @@ type App struct {
 	templates   map[string]*template.Template
 	config      Config
 	rateLimiter *RateLimiter
+	sseClients  map[chan SSEMessage]bool // SSE clients for real-time updates
+	sseMutex    sync.RWMutex             // Protect SSE clients map
+	syncStatus  *SyncStatus              // Current sync status
 }
 
 // RateLimiter implements a simple in-memory rate limiter
@@ -87,6 +93,7 @@ type Config struct {
 	GitHubRepoOwner    string
 	GitHubRepoName     string
 	Environment        string
+	WebhookSecret      string // GitHub webhook secret for signature validation
 }
 
 type User struct {
@@ -96,6 +103,28 @@ type User struct {
 	GitHubLogin string
 	Name        string
 	AvatarURL   string
+}
+
+// SSEMessage represents a server-sent event message
+type SSEMessage struct {
+	Event string      `json:"event"`
+	Data  interface{} `json:"data"`
+}
+
+// SyncStatus tracks the current state of GitHub synchronization
+type SyncStatus struct {
+	mu           sync.RWMutex
+	InProgress   bool      `json:"in_progress"`
+	LastSyncAt   time.Time `json:"last_sync_at"`
+	IssuesSynced int       `json:"issues_synced"`
+	Error        string    `json:"error,omitempty"`
+}
+
+// WebhookPayload represents a GitHub webhook payload
+type WebhookPayload struct {
+	Action string          `json:"action"`
+	Issue  json.RawMessage `json:"issue"`
+	Repo   json.RawMessage `json:"repository"`
 }
 
 func main() {
@@ -114,6 +143,7 @@ func main() {
 		GitHubRepoOwner:    mustGetEnv("GITHUB_REPO_OWNER"),
 		GitHubRepoName:     mustGetEnv("GITHUB_REPO_NAME"),
 		Environment:        getEnv("ENVIRONMENT", "development"),
+		WebhookSecret:      getEnv("GITHUB_WEBHOOK_SECRET", ""),
 	}
 
 	// Open database
@@ -153,6 +183,8 @@ func main() {
 		templates:   templates,
 		config:      config,
 		rateLimiter: NewRateLimiter(),
+		sseClients:  make(map[chan SSEMessage]bool),
+		syncStatus:  &SyncStatus{},
 	}
 
 	// Setup routes
@@ -169,6 +201,11 @@ func main() {
 	mux.HandleFunc("/api/issues", app.requireAuth(app.handleAPIIssues))
 	mux.HandleFunc("/api/issues/search", app.requireAuth(app.handleAPIIssuesSearch))
 	mux.HandleFunc("/api/sync/status", app.requireAuth(app.handleAPISyncStatus))
+	mux.HandleFunc("/api/dashboard-stats", app.requireAuth(app.handleAPIDashboardStats))
+	
+	// Week 2: Real-time features
+	mux.HandleFunc("/webhook/github", app.handleWebhook)
+	mux.HandleFunc("/events", app.requireAuth(app.handleSSE))
 
 	// Wrap with security headers middleware
 	handler := app.securityHeaders(mux)
@@ -176,8 +213,15 @@ func main() {
 	// Start background cleanup tasks
 	go app.cleanupExpiredSessions()
 
+	// Start background sync worker
+	go app.startBackgroundSync()
+
 	// Start server
 	log.Printf("Starting server on http://localhost:%s", config.Port)
+	log.Printf("GitHub OAuth configured for repo: %s/%s", config.GitHubRepoOwner, config.GitHubRepoName)
+	if config.WebhookSecret != "" {
+		log.Println("GitHub webhook endpoint available at: /webhook/github")
+	}
 	log.Fatal(http.ListenAndServe(":"+config.Port, handler))
 }
 
@@ -965,6 +1009,538 @@ func (app *App) handleAPISyncStatus(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
+// handleAPIDashboardStats returns dashboard statistics as JSON (for HTMX refresh)
+func (app *App) handleAPIDashboardStats(w http.ResponseWriter, r *http.Request) {
+	// Get statistics
+	var stats struct {
+		TotalIssues  int
+		OpenIssues   int
+		ClosedIssues int
+	}
+	
+	app.db.QueryRow("SELECT COUNT(*) FROM issues").Scan(&stats.TotalIssues)
+	app.db.QueryRow("SELECT COUNT(*) FROM issues WHERE state = 'open'").Scan(&stats.OpenIssues)
+	app.db.QueryRow("SELECT COUNT(*) FROM issues WHERE state = 'closed'").Scan(&stats.ClosedIssues)
+	
+	// Return as HTML fragments for HTMX
+	w.Header().Set("Content-Type", "text/html")
+	fmt.Fprintf(w, `
+		<div class="bg-gray-50 p-4 rounded">
+			<div class="text-2xl font-bold">%d</div>
+			<div class="text-gray-600">Total Issues</div>
+		</div>
+		<div class="bg-green-50 p-4 rounded">
+			<div class="text-2xl font-bold text-green-600">%d</div>
+			<div class="text-gray-600">Open Issues</div>
+		</div>
+		<div class="bg-purple-50 p-4 rounded">
+			<div class="text-2xl font-bold text-purple-600">%d</div>
+			<div class="text-gray-600">Closed Issues</div>
+		</div>
+	`, stats.TotalIssues, stats.OpenIssues, stats.ClosedIssues)
+}
+
+// handleWebhook processes GitHub webhook events for real-time updates
+func (app *App) handleWebhook(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Read the payload
+	payload, err := io.ReadAll(r.Body)
+	if err != nil {
+		log.Printf("Failed to read webhook payload: %v", err)
+		http.Error(w, "Failed to read payload", http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+
+	// Validate webhook signature if secret is configured
+	if app.config.WebhookSecret != "" {
+		signature := r.Header.Get("X-Hub-Signature-256")
+		if signature == "" {
+			http.Error(w, "Missing signature", http.StatusUnauthorized)
+			return
+		}
+
+		if !app.validateWebhookSignature(payload, signature) {
+			log.Printf("Invalid webhook signature")
+			http.Error(w, "Invalid signature", http.StatusUnauthorized)
+			return
+		}
+	}
+
+	// Get event type
+	eventType := r.Header.Get("X-GitHub-Event")
+	
+	// Store webhook event for audit
+	_, err = app.db.Exec(`
+		INSERT INTO webhook_events (event_type, signature, payload, processed)
+		VALUES (?, ?, ?, 0)
+	`, eventType, r.Header.Get("X-Hub-Signature-256"), string(payload))
+	
+	if err != nil {
+		log.Printf("Failed to store webhook event: %v", err)
+	}
+
+	// Handle different event types
+	switch eventType {
+	case "issues":
+		app.handleIssueWebhook(payload)
+	case "ping":
+		log.Println("Received GitHub webhook ping")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("pong"))
+		return
+	default:
+		log.Printf("Unhandled webhook event type: %s", eventType)
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
+// validateWebhookSignature validates GitHub webhook signature
+func (app *App) validateWebhookSignature(payload []byte, signature string) bool {
+	if !strings.HasPrefix(signature, "sha256=") {
+		return false
+	}
+	
+	expected := signature[7:] // Remove "sha256=" prefix
+	mac := hmac.New(sha256.New, []byte(app.config.WebhookSecret))
+	mac.Write(payload)
+	calculated := hex.EncodeToString(mac.Sum(nil))
+	
+	return hmac.Equal([]byte(expected), []byte(calculated))
+}
+
+// handleIssueWebhook processes issue webhook events
+func (app *App) handleIssueWebhook(payload []byte) {
+	var event struct {
+		Action string `json:"action"`
+		Issue  struct {
+			ID        int64     `json:"id"`
+			Number    int       `json:"number"`
+			Title     string    `json:"title"`
+			Body      string    `json:"body"`
+			State     string    `json:"state"`
+			CreatedAt time.Time `json:"created_at"`
+			UpdatedAt time.Time `json:"updated_at"`
+			ClosedAt  *time.Time `json:"closed_at"`
+			User      struct {
+				Login string `json:"login"`
+			} `json:"user"`
+			Assignee *struct {
+				Login string `json:"login"`
+			} `json:"assignee"`
+			Labels []struct {
+				Name string `json:"name"`
+			} `json:"labels"`
+		} `json:"issue"`
+	}
+
+	if err := json.Unmarshal(payload, &event); err != nil {
+		log.Printf("Failed to unmarshal issue webhook: %v", err)
+		return
+	}
+
+	// Convert labels to JSON string
+	labels := []string{}
+	for _, l := range event.Issue.Labels {
+		labels = append(labels, l.Name)
+	}
+	labelsJSON, _ := json.Marshal(labels)
+
+	// Update or insert issue
+	assignee := ""
+	if event.Issue.Assignee != nil {
+		assignee = event.Issue.Assignee.Login
+	}
+
+	_, err := app.db.Exec(`
+		INSERT OR REPLACE INTO issues (
+			github_id, number, title, body, state, labels,
+			assignee, author, created_at, updated_at, closed_at, synced_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+	`, event.Issue.ID, event.Issue.Number, event.Issue.Title, event.Issue.Body,
+		event.Issue.State, string(labelsJSON), assignee, event.Issue.User.Login,
+		event.Issue.CreatedAt, event.Issue.UpdatedAt, event.Issue.ClosedAt)
+
+	if err != nil {
+		log.Printf("Failed to update issue from webhook: %v", err)
+		return
+	}
+
+	// Broadcast update to SSE clients
+	app.broadcastSSE(SSEMessage{
+		Event: "issue_update",
+		Data: map[string]interface{}{
+			"action": event.Action,
+			"issue": map[string]interface{}{
+				"number": event.Issue.Number,
+				"title":  event.Issue.Title,
+				"state":  event.Issue.State,
+			},
+		},
+	})
+
+	log.Printf("Processed webhook: %s issue #%d", event.Action, event.Issue.Number)
+}
+
+// handleSSE handles Server-Sent Events for real-time updates
+func (app *App) handleSSE(w http.ResponseWriter, r *http.Request) {
+	// Set SSE headers
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no") // Disable Nginx buffering
+
+	// Create a channel for this client
+	messageChan := make(chan SSEMessage, 10)
+
+	// Register the client
+	app.sseMutex.Lock()
+	app.sseClients[messageChan] = true
+	app.sseMutex.Unlock()
+
+	// Remove client on disconnect
+	defer func() {
+		app.sseMutex.Lock()
+		delete(app.sseClients, messageChan)
+		close(messageChan)
+		app.sseMutex.Unlock()
+	}()
+
+	// Create a ticker for keepalive
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	// Get the flusher for real-time streaming
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	// Send initial connection message
+	fmt.Fprintf(w, "event: connected\ndata: {\"message\":\"Connected to real-time updates\"}\n\n")
+	flusher.Flush()
+
+	// Send current sync status
+	app.syncStatus.mu.RLock()
+	status := map[string]interface{}{
+		"in_progress":   app.syncStatus.InProgress,
+		"last_sync_at":  app.syncStatus.LastSyncAt,
+		"issues_synced": app.syncStatus.IssuesSynced,
+	}
+	app.syncStatus.mu.RUnlock()
+	
+	statusJSON, _ := json.Marshal(status)
+	fmt.Fprintf(w, "event: sync_status\ndata: %s\n\n", statusJSON)
+	flusher.Flush()
+
+	// Listen for messages and client disconnect
+	for {
+		select {
+		case msg := <-messageChan:
+			// Send message to client
+			data, _ := json.Marshal(msg.Data)
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", msg.Event, data)
+			flusher.Flush()
+
+		case <-ticker.C:
+			// Send keepalive
+			fmt.Fprintf(w, ": keepalive\n\n")
+			flusher.Flush()
+
+		case <-r.Context().Done():
+			// Client disconnected
+			return
+		}
+	}
+}
+
+// broadcastSSE sends a message to all connected SSE clients
+func (app *App) broadcastSSE(msg SSEMessage) {
+	app.sseMutex.RLock()
+	defer app.sseMutex.RUnlock()
+
+	for client := range app.sseClients {
+		select {
+		case client <- msg:
+			// Message sent
+		default:
+			// Client buffer is full, skip
+		}
+	}
+}
+
+// startBackgroundSync starts the background sync worker
+func (app *App) startBackgroundSync() {
+	// Initial sync after 10 seconds
+	time.Sleep(10 * time.Second)
+	app.performIncrementalSync()
+
+	// Then sync every 5 minutes
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		app.performIncrementalSync()
+	}
+}
+
+// performIncrementalSync performs an incremental sync with rate limiting
+func (app *App) performIncrementalSync() {
+	// Check if sync is already in progress
+	app.syncStatus.mu.Lock()
+	if app.syncStatus.InProgress {
+		app.syncStatus.mu.Unlock()
+		return
+	}
+	app.syncStatus.InProgress = true
+	app.syncStatus.Error = ""
+	app.syncStatus.mu.Unlock()
+
+	// Broadcast sync started
+	app.broadcastSSE(SSEMessage{
+		Event: "sync_started",
+		Data:  map[string]interface{}{"timestamp": time.Now()},
+	})
+
+	defer func() {
+		// Mark sync as complete
+		app.syncStatus.mu.Lock()
+		app.syncStatus.InProgress = false
+		app.syncStatus.LastSyncAt = time.Now()
+		app.syncStatus.mu.Unlock()
+
+		// Broadcast sync completed
+		app.broadcastSSE(SSEMessage{
+			Event: "sync_completed",
+			Data: map[string]interface{}{
+				"timestamp":     time.Now(),
+				"issues_synced": app.syncStatus.IssuesSynced,
+			},
+		})
+	}()
+
+	// Get the most recent user with an access token
+	var accessToken string
+	err := app.db.QueryRow(`
+		SELECT access_token FROM users 
+		WHERE access_token IS NOT NULL AND access_token != ''
+		ORDER BY id DESC LIMIT 1
+	`).Scan(&accessToken)
+
+	if err != nil {
+		log.Printf("No access token available for sync: %v", err)
+		app.syncStatus.mu.Lock()
+		app.syncStatus.Error = "No access token available"
+		app.syncStatus.mu.Unlock()
+		return
+	}
+
+	// Decrypt the access token
+	decryptedToken, err := app.decryptToken(accessToken)
+	if err != nil {
+		log.Printf("Failed to decrypt access token: %v", err)
+		app.syncStatus.mu.Lock()
+		app.syncStatus.Error = "Failed to decrypt token"
+		app.syncStatus.mu.Unlock()
+		return
+	}
+
+	// Get last sync time
+	var lastSync time.Time
+	err = app.db.QueryRow(`
+		SELECT COALESCE(MAX(updated_at), datetime('1970-01-01'))
+		FROM issues
+	`).Scan(&lastSync)
+
+	if err != nil {
+		lastSync = time.Unix(0, 0)
+	}
+
+	// Prepare GitHub API request with incremental sync
+	since := lastSync.Format(time.RFC3339)
+	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues?state=all&sort=updated&direction=desc&since=%s&per_page=100",
+		app.config.GitHubRepoOwner, app.config.GitHubRepoName, since)
+
+	log.Printf("Starting incremental sync since %s", since)
+
+	// Create HTTP client with rate limiting awareness
+	client := &http.Client{Timeout: 30 * time.Second}
+	
+	// Fetch issues with pagination
+	issuesSynced := 0
+	page := 1
+
+	for {
+		// Rate limit check (GitHub allows 5000 requests/hour for authenticated requests)
+		time.Sleep(100 * time.Millisecond) // Simple rate limiting: 10 requests per second max
+
+		pageURL := fmt.Sprintf("%s&page=%d", apiURL, page)
+		req, err := http.NewRequest("GET", pageURL, nil)
+		if err != nil {
+			log.Printf("Failed to create request: %v", err)
+			break
+		}
+
+		req.Header.Set("Authorization", "Bearer "+decryptedToken)
+		req.Header.Set("Accept", "application/vnd.github.v3+json")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Printf("Failed to fetch issues: %v", err)
+			app.syncStatus.mu.Lock()
+			app.syncStatus.Error = fmt.Sprintf("Failed to fetch issues: %v", err)
+			app.syncStatus.mu.Unlock()
+			break
+		}
+
+		// Check rate limit headers
+		remaining := resp.Header.Get("X-RateLimit-Remaining")
+		if remaining != "" {
+			if rem, _ := strconv.Atoi(remaining); rem < 100 {
+				log.Printf("Rate limit low: %s remaining", remaining)
+				// Wait longer if rate limit is low
+				time.Sleep(5 * time.Second)
+			}
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			log.Printf("GitHub API error: %d - %s", resp.StatusCode, string(body))
+			break
+		}
+
+		var issues []map[string]interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&issues); err != nil {
+			resp.Body.Close()
+			log.Printf("Failed to decode issues: %v", err)
+			break
+		}
+		resp.Body.Close()
+
+		if len(issues) == 0 {
+			break // No more issues
+		}
+
+		// Store issues in database
+		for _, issue := range issues {
+			if err := app.storeIssue(issue); err != nil {
+				log.Printf("Failed to store issue: %v", err)
+				continue
+			}
+			issuesSynced++
+
+			// Broadcast progress update every 10 issues
+			if issuesSynced%10 == 0 {
+				app.syncStatus.mu.Lock()
+				app.syncStatus.IssuesSynced = issuesSynced
+				app.syncStatus.mu.Unlock()
+
+				app.broadcastSSE(SSEMessage{
+					Event: "sync_progress",
+					Data: map[string]interface{}{
+						"issues_synced": issuesSynced,
+					},
+				})
+			}
+		}
+
+		// Check if we should continue to next page
+		if len(issues) < 100 {
+			break // This was the last page
+		}
+		page++
+	}
+
+	// Update sync status in database
+	_, err = app.db.Exec(`
+		INSERT OR REPLACE INTO sync_status (
+			repo_owner, repo_name, last_sync_at, sync_in_progress, issues_synced, updated_at
+		) VALUES (?, ?, CURRENT_TIMESTAMP, 0, ?, CURRENT_TIMESTAMP)
+	`, app.config.GitHubRepoOwner, app.config.GitHubRepoName, issuesSynced)
+
+	if err != nil {
+		log.Printf("Failed to update sync status: %v", err)
+	}
+
+	app.syncStatus.mu.Lock()
+	app.syncStatus.IssuesSynced = issuesSynced
+	app.syncStatus.mu.Unlock()
+
+	log.Printf("Incremental sync completed: %d issues synced", issuesSynced)
+}
+
+// storeIssue stores a GitHub issue in the database
+func (app *App) storeIssue(issue map[string]interface{}) error {
+	// Extract fields
+	id := int64(issue["id"].(float64))
+	number := int(issue["number"].(float64))
+	title := issue["title"].(string)
+	body := ""
+	if issue["body"] != nil {
+		body = issue["body"].(string)
+	}
+	state := issue["state"].(string)
+
+	// Handle labels
+	labels := []string{}
+	if labelsList, ok := issue["labels"].([]interface{}); ok {
+		for _, l := range labelsList {
+			if labelMap, ok := l.(map[string]interface{}); ok {
+				if name, ok := labelMap["name"].(string); ok {
+					labels = append(labels, name)
+				}
+			}
+		}
+	}
+	labelsJSON, _ := json.Marshal(labels)
+
+	// Handle assignee
+	assignee := ""
+	if issue["assignee"] != nil {
+		if assigneeMap, ok := issue["assignee"].(map[string]interface{}); ok {
+			if login, ok := assigneeMap["login"].(string); ok {
+				assignee = login
+			}
+		}
+	}
+
+	// Handle author
+	author := ""
+	if user, ok := issue["user"].(map[string]interface{}); ok {
+		if login, ok := user["login"].(string); ok {
+			author = login
+		}
+	}
+
+	// Parse timestamps
+	createdAt, _ := time.Parse(time.RFC3339, issue["created_at"].(string))
+	updatedAt, _ := time.Parse(time.RFC3339, issue["updated_at"].(string))
+	
+	var closedAt *time.Time
+	if issue["closed_at"] != nil && issue["closed_at"].(string) != "" {
+		t, _ := time.Parse(time.RFC3339, issue["closed_at"].(string))
+		closedAt = &t
+	}
+
+	// Store in database
+	_, err := app.db.Exec(`
+		INSERT OR REPLACE INTO issues (
+			github_id, number, title, body, state, labels,
+			assignee, author, created_at, updated_at, closed_at, synced_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+	`, id, number, title, body, state, string(labelsJSON),
+		assignee, author, createdAt, updatedAt, closedAt)
+
+	return err
+}
+
 func (app *App) getOAuthConfig() *oauth2.Config {
 	return &oauth2.Config{
 		ClientID:     app.config.GitHubClientID,
@@ -1283,6 +1859,33 @@ func runMigrations(db *sql.DB) {
 	CREATE INDEX IF NOT EXISTS idx_issues_number ON issues(number);
 	CREATE INDEX IF NOT EXISTS idx_issues_updated ON issues(updated_at);
 	CREATE INDEX IF NOT EXISTS idx_issues_created ON issues(created_at);
+
+	CREATE TABLE IF NOT EXISTS sync_status (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		repo_owner TEXT NOT NULL,
+		repo_name TEXT NOT NULL,
+		last_sync_at DATETIME,
+		sync_in_progress BOOLEAN DEFAULT 0,
+		issues_synced INTEGER DEFAULT 0,
+		error TEXT,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(repo_owner, repo_name)
+	);
+
+	CREATE TABLE IF NOT EXISTS webhook_events (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		event_type TEXT NOT NULL,
+		action TEXT,
+		signature TEXT,
+		payload TEXT NOT NULL,
+		processed BOOLEAN DEFAULT 0,
+		error TEXT,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_webhook_events_created ON webhook_events(created_at);
+	CREATE INDEX IF NOT EXISTS idx_webhook_events_processed ON webhook_events(processed);
 	CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
 
 	CREATE TABLE IF NOT EXISTS csrf_tokens (

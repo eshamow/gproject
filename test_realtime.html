@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Test Real-time Features</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="p-8 bg-gray-50">
+    <h1 class="text-2xl font-bold mb-4">Real-time Features Test</h1>
+    
+    <div class="bg-white rounded-lg shadow p-6">
+        <h2 class="text-lg font-semibold mb-3">SSE Connection Test</h2>
+        
+        <div class="space-y-3">
+            <div class="flex items-center gap-2">
+                <span class="font-medium">Connection Status:</span>
+                <span id="status" class="text-gray-500">Not connected</span>
+            </div>
+            
+            <div class="flex items-center gap-2">
+                <span class="font-medium">Last Event:</span>
+                <span id="last-event" class="text-gray-500">None</span>
+            </div>
+            
+            <div id="events" class="mt-4 p-4 bg-gray-50 rounded h-64 overflow-y-auto font-mono text-sm">
+                <div class="text-gray-500">Waiting for events...</div>
+            </div>
+        </div>
+        
+        <div class="mt-4 flex gap-2">
+            <button onclick="testSync()" class="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600">
+                Trigger Sync
+            </button>
+            <button onclick="connect()" class="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600">
+                Connect SSE
+            </button>
+            <button onclick="disconnect()" class="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600">
+                Disconnect
+            </button>
+        </div>
+    </div>
+
+    <script>
+        let eventSource = null;
+        const statusEl = document.getElementById('status');
+        const lastEventEl = document.getElementById('last-event');
+        const eventsEl = document.getElementById('events');
+        
+        function connect() {
+            if (eventSource) {
+                eventSource.close();
+            }
+            
+            eventSource = new EventSource('/events');
+            statusEl.textContent = 'Connecting...';
+            statusEl.className = 'text-yellow-600';
+            
+            eventSource.onopen = () => {
+                statusEl.textContent = 'Connected';
+                statusEl.className = 'text-green-600';
+                addEvent('Connection opened');
+            };
+            
+            eventSource.onerror = (error) => {
+                statusEl.textContent = 'Error/Disconnected';
+                statusEl.className = 'text-red-600';
+                addEvent('Connection error');
+            };
+            
+            // Listen for specific event types
+            ['connected', 'sync_started', 'sync_progress', 'sync_completed', 'issue_update', 'sync_status'].forEach(eventType => {
+                eventSource.addEventListener(eventType, (event) => {
+                    lastEventEl.textContent = eventType;
+                    addEvent(`[${eventType}] ${event.data}`);
+                });
+            });
+            
+            eventSource.onmessage = (event) => {
+                lastEventEl.textContent = 'message';
+                addEvent(`[message] ${event.data}`);
+            };
+        }
+        
+        function disconnect() {
+            if (eventSource) {
+                eventSource.close();
+                eventSource = null;
+                statusEl.textContent = 'Disconnected';
+                statusEl.className = 'text-gray-500';
+                addEvent('Connection closed');
+            }
+        }
+        
+        function addEvent(text) {
+            const time = new Date().toLocaleTimeString();
+            const div = document.createElement('div');
+            div.className = 'text-gray-700';
+            div.textContent = `[${time}] ${text}`;
+            
+            if (eventsEl.firstChild && eventsEl.firstChild.textContent.includes('Waiting for events')) {
+                eventsEl.innerHTML = '';
+            }
+            
+            eventsEl.appendChild(div);
+            eventsEl.scrollTop = eventsEl.scrollHeight;
+        }
+        
+        function testSync() {
+            // Get CSRF token from meta tag or cookie if available
+            fetch('/sync', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                credentials: 'same-origin'
+            })
+            .then(response => response.text())
+            .then(data => {
+                addEvent('Sync triggered: ' + data);
+            })
+            .catch(error => {
+                addEvent('Sync error: ' + error);
+            });
+        }
+        
+        // Auto-connect on page load
+        window.addEventListener('load', () => {
+            console.log('Page loaded, attempting SSE connection...');
+            // Note: This will only work if the user is authenticated
+        });
+    </script>
+</body>
+</html>

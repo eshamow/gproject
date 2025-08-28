@@ -58,10 +58,29 @@
         </div>
     </div>
     
+    <!-- Real-time sync status bar -->
+    <div id="issues-sync-status" class="hidden bg-blue-50 border-b border-blue-200 p-3">
+        <div class="flex items-center justify-between">
+            <div class="flex items-center gap-2">
+                <svg class="animate-spin h-4 w-4 text-blue-600" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                <span class="text-blue-800">Syncing with GitHub...</span>
+            </div>
+            <div class="text-sm text-blue-600">
+                <span id="sync-progress-text"></span>
+            </div>
+        </div>
+        <div class="mt-2 w-full bg-blue-100 rounded-full h-2">
+            <div id="sync-progress-bar" class="bg-blue-600 h-2 rounded-full transition-all duration-300" style="width: 0%"></div>
+        </div>
+    </div>
+    
     <!-- Issues list with HTMX loading -->
     <div id="issues-list" 
          hx-get="/api/issues?state=open" 
-         hx-trigger="load"
+         hx-trigger="load, refresh from:body"
          hx-indicator="#loading-indicator">
         <div id="loading-indicator" class="p-8 text-center">
             <svg class="animate-spin h-8 w-8 text-blue-500 mx-auto" fill="none" viewBox="0 0 24 24">
@@ -91,14 +110,14 @@
                         const updatedAt = new Date(issue.updated_at).toLocaleDateString();
                         
                         html += `
-                            <div class="p-4 hover:bg-gray-50 transition">
+                            <div class="p-4 hover:bg-gray-50 transition" data-issue-number="${issue.number}">
                                 <div class="flex items-start justify-between">
                                     <div class="flex-1">
                                         <div class="flex items-center gap-2 mb-1">
                                             <a href="${issue.html_url}" target="_blank" class="text-lg font-medium text-blue-600 hover:text-blue-800">
                                                 ${escapeHtml(issue.title)}
                                             </a>
-                                            <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${stateClass}">
+                                            <span class="issue-state-badge inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${stateClass}">
                                                 ${issue.state}
                                             </span>
                                         </div>
@@ -195,6 +214,46 @@
                 `;
                 event.preventDefault();
             }
+        }
+    });
+    
+    // Listen for SSE sync events to show/hide sync status bar
+    document.addEventListener('alpine:initialized', () => {
+        const syncStatusBar = document.getElementById('issues-sync-status');
+        const progressBar = document.getElementById('sync-progress-bar');
+        const progressText = document.getElementById('sync-progress-text');
+        
+        // Override the updateSyncStatus function to handle issues page specifically
+        const rootElement = document.querySelector('[x-data]');
+        if (rootElement && rootElement.__x) {
+            const originalUpdate = rootElement.__x.$data.updateSyncStatus;
+            rootElement.__x.$data.updateSyncStatus = function(type, data) {
+                // Call original handler
+                if (originalUpdate) {
+                    originalUpdate.call(this, type, data);
+                }
+                
+                // Handle issues page specific updates
+                if (syncStatusBar) {
+                    if (type === 'started') {
+                        syncStatusBar.classList.remove('hidden');
+                        progressBar.style.width = '0%';
+                        progressText.textContent = 'Starting...';
+                    } else if (type === 'progress') {
+                        const progress = data.progress || 0;
+                        progressBar.style.width = progress + '%';
+                        progressText.textContent = `${data.current || 0} of ${data.total || 0} issues`;
+                    } else if (type === 'completed') {
+                        progressBar.style.width = '100%';
+                        progressText.textContent = `Completed - ${data.issues_synced} issues synced`;
+                        
+                        // Hide after 3 seconds and refresh
+                        setTimeout(() => {
+                            syncStatusBar.classList.add('hidden');
+                        }, 3000);
+                    }
+                }
+            };
         }
     });
     

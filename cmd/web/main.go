@@ -870,6 +870,10 @@ func (app *App) handleAPIIssues(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Failed to count issues: %v", err)
 	}
 	
+	// Log API response for debugging
+	log.Printf("API Issues: returning %d issues (total: %d, state filter: %s)", 
+		len(issues), total, state)
+	
 	response := map[string]interface{}{
 		"issues": issues,
 		"total":  total,
@@ -1047,7 +1051,14 @@ func (app *App) handleAPIDashboardStats(w http.ResponseWriter, r *http.Request) 
 
 // handleWebhook processes GitHub webhook events for real-time updates
 func (app *App) handleWebhook(w http.ResponseWriter, r *http.Request) {
+	// Log incoming webhook request
+	log.Printf("Webhook request received: Method=%s, Event=%s, Delivery=%s",
+		r.Method,
+		r.Header.Get("X-GitHub-Event"),
+		r.Header.Get("X-GitHub-Delivery"))
+	
 	if r.Method != http.MethodPost {
+		log.Printf("Webhook rejected: invalid method %s", r.Method)
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -1061,19 +1072,30 @@ func (app *App) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 
+	log.Printf("Webhook payload size: %d bytes", len(payload))
+
 	// Validate webhook signature if secret is configured
 	if app.config.WebhookSecret != "" {
 		signature := r.Header.Get("X-Hub-Signature-256")
 		if signature == "" {
+			log.Printf("Webhook rejected: missing signature header")
 			http.Error(w, "Missing signature", http.StatusUnauthorized)
 			return
 		}
 
+		log.Printf("Validating webhook signature: %s...", signature[:30])
 		if !app.validateWebhookSignature(payload, signature) {
-			log.Printf("Invalid webhook signature")
+			log.Printf("Webhook rejected: invalid signature")
+			// Log additional debugging info
+			mac := hmac.New(sha256.New, []byte(app.config.WebhookSecret))
+			mac.Write(payload)
+			calculated := hex.EncodeToString(mac.Sum(nil))
+			log.Printf("Expected: sha256=%s", calculated)
+			log.Printf("Received: %s", signature)
 			http.Error(w, "Invalid signature", http.StatusUnauthorized)
 			return
 		}
+		log.Printf("Webhook signature validated successfully")
 	}
 
 	// Get event type
@@ -1103,6 +1125,14 @@ func (app *App) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+// min returns the minimum of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // validateWebhookSignature validates GitHub webhook signature
@@ -1142,12 +1172,32 @@ func (app *App) handleIssueWebhook(payload []byte) {
 				Name string `json:"name"`
 			} `json:"labels"`
 		} `json:"issue"`
+		Repository struct {
+			Owner struct {
+				Login string `json:"login"`
+			} `json:"owner"`
+			Name string `json:"name"`
+		} `json:"repository"`
 	}
 
 	if err := json.Unmarshal(payload, &event); err != nil {
 		log.Printf("Failed to unmarshal issue webhook: %v", err)
+		log.Printf("Webhook payload sample: %s", string(payload[:min(500, len(payload))]))
 		return
 	}
+
+	// Validate repository matches our configured repo
+	if event.Repository.Owner.Login != app.config.GitHubRepoOwner ||
+		event.Repository.Name != app.config.GitHubRepoName {
+		log.Printf("Webhook from wrong repository: %s/%s (expected %s/%s)",
+			event.Repository.Owner.Login, event.Repository.Name,
+			app.config.GitHubRepoOwner, app.config.GitHubRepoName)
+		return
+	}
+
+	log.Printf("Processing %s event for issue #%d in %s/%s",
+		event.Action, event.Issue.Number,
+		event.Repository.Owner.Login, event.Repository.Name)
 
 	// Convert labels to JSON string
 	labels := []string{}
@@ -1189,7 +1239,7 @@ func (app *App) handleIssueWebhook(payload []byte) {
 		},
 	})
 
-	log.Printf("Processed webhook: %s issue #%d", event.Action, event.Issue.Number)
+	log.Printf("Successfully processed webhook: %s issue #%d (state: %s)", event.Action, event.Issue.Number, event.Issue.State)
 }
 
 // handleSSE handles Server-Sent Events for real-time updates

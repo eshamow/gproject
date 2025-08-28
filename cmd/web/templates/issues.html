@@ -223,37 +223,46 @@
         const progressBar = document.getElementById('sync-progress-bar');
         const progressText = document.getElementById('sync-progress-text');
         
-        // Override the updateSyncStatus function to handle issues page specifically
-        const rootElement = document.querySelector('[x-data]');
-        if (rootElement && rootElement.__x) {
-            const originalUpdate = rootElement.__x.$data.updateSyncStatus;
-            rootElement.__x.$data.updateSyncStatus = function(type, data) {
-                // Call original handler
-                if (originalUpdate) {
-                    originalUpdate.call(this, type, data);
+        // Function to handle sync status updates
+        function handleSyncStatus(type, data) {
+            if (syncStatusBar) {
+                if (type === 'started') {
+                    syncStatusBar.classList.remove('hidden');
+                    progressBar.style.width = '0%';
+                    progressText.textContent = 'Starting...';
+                } else if (type === 'progress') {
+                    const progress = data.progress || 0;
+                    progressBar.style.width = progress + '%';
+                    progressText.textContent = `${data.current || 0} of ${data.total || 0} issues`;
+                } else if (type === 'completed') {
+                    progressBar.style.width = '100%';
+                    progressText.textContent = `Completed - ${data.issues_synced} issues synced`;
+                    
+                    // Hide after 3 seconds and refresh
+                    setTimeout(() => {
+                        syncStatusBar.classList.add('hidden');
+                    }, 3000);
                 }
-                
-                // Handle issues page specific updates
-                if (syncStatusBar) {
-                    if (type === 'started') {
-                        syncStatusBar.classList.remove('hidden');
-                        progressBar.style.width = '0%';
-                        progressText.textContent = 'Starting...';
-                    } else if (type === 'progress') {
-                        const progress = data.progress || 0;
-                        progressBar.style.width = progress + '%';
-                        progressText.textContent = `${data.current || 0} of ${data.total || 0} issues`;
-                    } else if (type === 'completed') {
-                        progressBar.style.width = '100%';
-                        progressText.textContent = `Completed - ${data.issues_synced} issues synced`;
-                        
-                        // Hide after 3 seconds and refresh
-                        setTimeout(() => {
-                            syncStatusBar.classList.add('hidden');
-                        }, 3000);
+            }
+        }
+        
+        // Listen for sync status updates via SSE when DOM is ready
+        if (window.addEventListener) {
+            window.addEventListener('DOMContentLoaded', () => {
+                // Wait a moment for SSE manager to initialize
+                setTimeout(() => {
+                    if (window.sseManager && window.sseManager.eventSource) {
+                        window.sseManager.eventSource.addEventListener('sync_status', (event) => {
+                            try {
+                                const syncData = JSON.parse(event.data);
+                                handleSyncStatus(syncData.type, syncData);
+                            } catch (e) {
+                                console.error('Failed to parse sync status:', e);
+                            }
+                        });
                     }
-                }
-            };
+                }, 1000);
+            });
         }
     });
     

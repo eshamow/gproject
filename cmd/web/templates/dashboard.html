@@ -63,11 +63,6 @@
                         Loading sync status...
                     </span>
                     <div class="flex items-center gap-2">
-                        <span class="text-xs text-gray-500">Real-time updates:</span>
-                        <div id="sse-indicator" class="flex items-center gap-1">
-                            <div class="w-2 h-2 bg-gray-400 rounded-full animate-pulse"></div>
-                            <span class="text-xs text-gray-500">Connecting...</span>
-                        </div>
                     </div>
                 </div>
             </div>
@@ -203,32 +198,56 @@
     updateLastSyncTime();
     setInterval(updateLastSyncTime, 30000);
     
-    // Update SSE connection indicator
-    document.addEventListener('alpine:initialized', () => {
-        const updateSSEIndicator = () => {
-            const indicator = document.getElementById('sse-indicator');
-            if (!indicator) return;
-            
-            const rootElement = document.querySelector('[x-data]');
-            if (rootElement && rootElement.__x) {
-                const connected = rootElement.__x.$data.connected;
-                if (connected) {
-                    indicator.innerHTML = `
-                        <div class="w-2 h-2 bg-green-500 rounded-full"></div>
-                        <span class="text-xs text-green-600">Live</span>
-                    `;
-                } else {
-                    indicator.innerHTML = `
-                        <div class="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
-                        <span class="text-xs text-red-600">Reconnecting...</span>
-                    `;
-                }
-            }
-        };
-        
-        // Update indicator periodically
-        setInterval(updateSSEIndicator, 2000);
-        setTimeout(updateSSEIndicator, 500);
-    });
+//     // Update SSE connection indicator  
+//     const updateSSEIndicator = () => {
+//         const indicator = document.getElementById('sse-indicator');
+//         if (!indicator) return;
+//         
+//         // Check if SSE is connected via the global state
+//         if (window.sseManager) {
+//             const connected = window.sseManager.status === 'connected';
+//             if (connected) {
+//                 indicator.innerHTML = `
+//                     <div class="w-2 h-2 bg-green-500 rounded-full"></div>
+//                     <span class="text-xs text-green-600">Live</span>
+//                 `;
+//             } else if (window.sseManager.status === 'connecting') {
+//                 indicator.innerHTML = `
+//                     <div class="w-2 h-2 bg-yellow-500 rounded-full animate-pulse"></div>
+//                     <span class="text-xs text-yellow-600">Connecting...</span>
+//                 `;
+//             } else {
+//                 indicator.innerHTML = `
+//                     <div class="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
+//                     <span class="text-xs text-red-600">Disconnected</span>
+//                 `;
+//             }
+//         } else {
+//             // SSE manager not yet initialized
+//             indicator.innerHTML = `
+//                 <div class="w-2 h-2 bg-gray-400 rounded-full animate-pulse"></div>
+//                 <span class="text-xs text-gray-500">Initializing...</span>
+//             `;
+//         }
+//     };
+//     
+//     // Start updating indicator when DOM is ready
+//     if (document.readyState === 'loading') {
+//         document.addEventListener('DOMContentLoaded', () => {
+//             // Initial check
+//             updateSSEIndicator();
+//             // Update indicator periodically
+//             setInterval(updateSSEIndicator, 1000);
+//         });
+//     } else {
+//         // DOM already loaded
+//         updateSSEIndicator();
+//         setInterval(updateSSEIndicator, 1000);
+//     }
+    
+    // Simple auto-refresh every 60 seconds
+    setTimeout(() => {
+        location.reload();
+    }, 60000);
 </script>
 {{end}}

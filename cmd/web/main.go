@@ -205,7 +205,12 @@ func main() {
 	
 	// Week 2: Real-time features
 	mux.HandleFunc("/webhook/github", app.handleWebhook)
-	mux.HandleFunc("/events", app.requireAuth(app.handleSSE))
+	mux.HandleFunc("/events", app.handleSSE) // Remove requireAuth to allow public SSE connection
+	
+	// Safari SSE debug page (development only)
+	mux.HandleFunc("/safari_sse_test.html", func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, "safari_sse_test.html")
+	})
 
 	// Wrap with security headers middleware
 	handler := app.securityHeaders(mux)
@@ -1189,9 +1194,13 @@ func (app *App) handleIssueWebhook(payload []byte) {
 
 // handleSSE handles Server-Sent Events for real-time updates
 func (app *App) handleSSE(w http.ResponseWriter, r *http.Request) {
-	// Set SSE headers
+	// Check if user is authenticated (but don't block connection)
+	user := app.getCurrentUser(r)
+	isAuthenticated := user != nil
+	
+	// Set SSE headers with Safari compatibility
 	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no") // Disable Nginx buffering
 
@@ -1223,30 +1232,39 @@ func (app *App) handleSSE(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Send initial connection message
-	fmt.Fprintf(w, "event: connected\ndata: {\"message\":\"Connected to real-time updates\"}\n\n")
+	connectionMsg := "Connected to real-time updates"
+	if !isAuthenticated {
+		connectionMsg = "Connected (login for full updates)"
+	}
+	fmt.Fprintf(w, "event: connected\ndata: {\"message\":\"%s\"}\n\n", connectionMsg)
 	flusher.Flush()
 
-	// Send current sync status
-	app.syncStatus.mu.RLock()
-	status := map[string]interface{}{
-		"in_progress":   app.syncStatus.InProgress,
-		"last_sync_at":  app.syncStatus.LastSyncAt,
-		"issues_synced": app.syncStatus.IssuesSynced,
+	// Only send sync status to authenticated users
+	if isAuthenticated {
+		app.syncStatus.mu.RLock()
+		status := map[string]interface{}{
+			"in_progress":   app.syncStatus.InProgress,
+			"last_sync_at":  app.syncStatus.LastSyncAt,
+			"issues_synced": app.syncStatus.IssuesSynced,
+		}
+		app.syncStatus.mu.RUnlock()
+		
+		statusJSON, _ := json.Marshal(status)
+		fmt.Fprintf(w, "event: sync_status\ndata: %s\n\n", statusJSON)
+		flusher.Flush()
 	}
-	app.syncStatus.mu.RUnlock()
-	
-	statusJSON, _ := json.Marshal(status)
-	fmt.Fprintf(w, "event: sync_status\ndata: %s\n\n", statusJSON)
-	flusher.Flush()
 
 	// Listen for messages and client disconnect
 	for {
 		select {
 		case msg := <-messageChan:
-			// Send message to client
-			data, _ := json.Marshal(msg.Data)
-			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", msg.Event, data)
-			flusher.Flush()
+			// Only send sensitive messages to authenticated users
+			if isAuthenticated || msg.Event == "connected" || msg.Event == "keepalive" {
+				// Send message to client
+				data, _ := json.Marshal(msg.Data)
+				fmt.Fprintf(w, "event: %s\ndata: %s\n\n", msg.Event, data)
+				flusher.Flush()
+			}
 
 		case <-ticker.C:
 			// Send keepalive
@@ -1580,6 +1598,15 @@ func (app *App) requireAuth(handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		user := app.getCurrentUser(r)
 		if user == nil {
+			// For SSE endpoints, return an error event
+			if r.Header.Get("Accept") == "text/event-stream" || r.URL.Path == "/events" {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Header().Set("Cache-Control", "no-cache")
+				w.Header().Set("Connection", "close")
+				w.WriteHeader(http.StatusUnauthorized)
+				fmt.Fprintf(w, "event: error\ndata: {\"error\":\"Authentication required\"}\n\n")
+				return
+			}
 			// For API endpoints, return JSON error
 			if strings.HasPrefix(r.URL.Path, "/api/") {
 				w.Header().Set("Content-Type", "application/json")

@@ -6,23 +6,8 @@
     <title>{{block "title" .}}GProject - GitHub Issues Frontend{{end}}</title>
     <script src="https://unpkg.com/htmx.org@1.9.10"></script>
     <script src="https://cdn.tailwindcss.com"></script>
-    <style>
-        .htmx-indicator {
-            display: none;
-        }
-        .htmx-request .htmx-indicator {
-            display: inline-block;
-        }
-        .htmx-request.htmx-indicator {
-            display: inline-block;
-        }
-    </style>
-    <!-- HTMX SSE Extension -->
-    <script src="https://unpkg.com/htmx.org@1.9.10/dist/ext/sse.js"></script>
-    <!-- Alpine.js for reactive UI -->
-    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.13.5/dist/cdn.min.js"></script>
 </head>
-<body class="bg-gray-50" x-data="sseManager()" x-init="init()">
+<body class="bg-gray-50">
     <nav class="bg-white shadow">
         <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
             <div class="flex justify-between h-16">
@@ -31,6 +16,12 @@
                 </div>
                 {{if .User}}
                 <div class="flex items-center space-x-4">
+                    <!-- SSE Connection Status Indicator -->
+                    <div id="sse-status" class="flex items-center space-x-1">
+                        <span id="sse-status-dot" class="h-2 w-2 rounded-full inline-block animate-pulse bg-gray-400"></span>
+                        <span id="sse-status-text" class="text-xs text-gray-500">Connecting...</span>
+                    </div>
+                    
                     <img src="{{.User.AvatarURL}}" alt="{{.User.GitHubLogin}}" class="w-8 h-8 rounded-full">
                     <span>{{.User.GitHubLogin}}</span>
                     <a href="/logout" class="text-red-600 hover:text-red-800">Logout</a>
@@ -52,276 +43,233 @@
     <main class="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
         {{block "content" .}}{{end}}
     </main>
-
-    <!-- Connection Status Indicator -->
-    <div x-show="showConnectionStatus" 
-         x-transition
-         :class="connected ? 'bg-green-500' : 'bg-red-500'"
-         class="fixed bottom-4 right-4 text-white px-4 py-2 rounded-lg shadow-lg flex items-center gap-2 z-50">
-        <svg x-show="connected" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
-        </svg>
-        <svg x-show="!connected" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
-        </svg>
-        <span x-text="connected ? 'Connected' : 'Disconnected'"></span>
-    </div>
-
-    <!-- Toast Notifications Container -->
-    <div id="toast-container" class="fixed top-4 right-4 z-50 space-y-2"></div>
-
-    <!-- SSE Management Script -->
+    
+    {{if .User}}
     <script>
-        // Global SSE manager using Alpine.js
-        function sseManager() {
-            return {
-                connected: false,
-                showConnectionStatus: false,
+        // Vanilla JavaScript SSE Manager (no Alpine.js, no CSP violations)
+        (function() {
+            'use strict';
+            
+            console.log('SSE Manager initializing...');
+            
+            // SSE Manager state
+            const state = {
                 eventSource: null,
+                status: 'connecting',
+                statusText: 'Connecting...',
                 reconnectAttempts: 0,
-                maxReconnectDelay: 30000, // 30 seconds max
-                baseReconnectDelay: 1000, // 1 second base
-                notificationPermission: 'default',
-
-                init() {
-                    // Request notification permission
-                    this.requestNotificationPermission();
+                maxReconnectAttempts: 5,
+                reconnectDelay: 1000,
+                hasConnected: false
+            };
+            
+            // Update UI based on status
+            function updateUI() {
+                const statusDot = document.getElementById('sse-status-dot');
+                const statusText = document.getElementById('sse-status-text');
+                
+                if (!statusDot || !statusText) return;
+                
+                // Remove all status classes
+                statusDot.classList.remove('bg-green-500', 'bg-gray-400', 'bg-red-500');
+                statusText.classList.remove('text-green-600', 'text-gray-500', 'text-red-600');
+                
+                // Add appropriate classes based on status
+                switch(state.status) {
+                    case 'connected':
+                        statusDot.classList.add('bg-green-500');
+                        statusText.classList.add('text-green-600');
+                        break;
+                    case 'connecting':
+                        statusDot.classList.add('bg-gray-400');
+                        statusText.classList.add('text-gray-500');
+                        break;
+                    case 'disconnected':
+                    case 'error':
+                        statusDot.classList.add('bg-red-500');
+                        statusText.classList.add('text-red-600');
+                        break;
+                }
+                
+                statusText.textContent = state.statusText;
+            }
+            
+            // Set status and update UI
+            function setStatus(status, text) {
+                state.status = status;
+                state.statusText = text;
+                updateUI();
+            }
+            
+            // Disconnect SSE
+            function disconnect() {
+                if (state.eventSource) {
+                    state.eventSource.close();
+                    state.eventSource = null;
+                }
+                setStatus('disconnected', 'Disconnected');
+            }
+            
+            // Handle connection errors
+            function handleError() {
+                if (state.reconnectAttempts >= state.maxReconnectAttempts) {
+                    setStatus('error', 'Connection failed');
+                    disconnect();
+                    return;
+                }
+                
+                state.reconnectAttempts++;
+                setStatus('disconnected', `Reconnecting (${state.reconnectAttempts}/${state.maxReconnectAttempts})...`);
+                
+                setTimeout(() => {
+                    connect();
+                }, state.reconnectDelay);
+                
+                // Exponential backoff
+                state.reconnectDelay = Math.min(state.reconnectDelay * 2, 30000);
+            }
+            
+            // Connect to SSE endpoint
+            function connect() {
+                // Don't create duplicate connections
+                if (state.eventSource && state.eventSource.readyState !== EventSource.CLOSED) {
+                    return;
+                }
+                
+                setStatus('connecting', 'Connecting...');
+                state.hasConnected = false;
+                
+                try {
+                    state.eventSource = new EventSource('/events');
                     
-                    // Connect to SSE if user is logged in
-                    {{if .User}}
-                    this.connectSSE();
-                    {{end}}
-                },
-
-                requestNotificationPermission() {
-                    if ('Notification' in window && Notification.permission === 'default') {
-                        Notification.requestPermission().then(permission => {
-                            this.notificationPermission = permission;
-                        });
-                    }
-                },
-
-                connectSSE() {
-                    if (this.eventSource) {
-                        this.eventSource.close();
-                    }
-
-                    this.eventSource = new EventSource('/events');
+                    state.eventSource.onopen = () => {
+                        console.log('SSE connection opened');
+                        state.hasConnected = true;
+                        state.reconnectAttempts = 0;
+                        state.reconnectDelay = 1000;
+                        setStatus('connected', 'Connected');
+                    };
                     
-                    this.eventSource.onopen = () => {
-                        console.log('SSE connected');
-                        this.connected = true;
-                        this.showConnectionStatus = true;
-                        this.reconnectAttempts = 0;
-                        setTimeout(() => {
-                            this.showConnectionStatus = false;
-                        }, 3000);
+                    state.eventSource.addEventListener('connected', (event) => {
+                        console.log('Received connected event:', event.data);
+                        state.hasConnected = true;
+                        setStatus('connected', 'Connected');
+                    });
+                    
+                    state.eventSource.addEventListener('error', (event) => {
+                        console.log('Received error event:', event);
+                        if (event.data) {
+                            try {
+                                const data = JSON.parse(event.data);
+                                if (data.error === 'Authentication required') {
+                                    setStatus('error', 'Login required');
+                                    disconnect();
+                                    return;
+                                }
+                            } catch (e) {
+                                console.error('Failed to parse error data:', e);
+                            }
+                        }
+                        handleError();
+                    });
+                    
+                    state.eventSource.addEventListener('sync_status', (event) => {
+                        console.log('Sync status update:', event.data);
+                        // Handle sync status updates
+                        try {
+                            const data = JSON.parse(event.data);
+                            // Update sync status in UI if needed
+                            const syncStatusEl = document.getElementById('sync-status');
+                            if (syncStatusEl && data.message) {
+                                // Could update via HTMX or direct DOM manipulation
+                                console.log('Sync status:', data.message);
+                            }
+                        } catch (e) {
+                            console.error('Failed to parse sync status:', e);
+                        }
+                    });
+                    
+                    state.eventSource.addEventListener('issue_update', (event) => {
+                        console.log('Issue update:', event.data);
+                        // Handle issue updates - could trigger HTMX refresh
+                        // For now, just log it
+                    });
+                    
+                    state.eventSource.onerror = (error) => {
+                        console.error('SSE connection error:', error);
+                        
+                        if (state.eventSource.readyState === EventSource.CLOSED) {
+                            if (!state.hasConnected) {
+                                // Connection failed immediately - likely authentication error
+                                fetch('/events', {
+                                    method: 'GET',
+                                    headers: { 'Accept': 'text/event-stream' },
+                                    credentials: 'same-origin'
+                                }).then(response => {
+                                    if (response.status === 401) {
+                                        setStatus('error', 'Login required');
+                                        disconnect();
+                                    } else {
+                                        handleError();
+                                    }
+                                }).catch(() => {
+                                    handleError();
+                                });
+                            } else {
+                                // Connection was established but then lost
+                                handleError();
+                            }
+                        }
                     };
-
-                    this.eventSource.onerror = (error) => {
-                        console.error('SSE error:', error);
-                        this.connected = false;
-                        this.showConnectionStatus = true;
-                        this.eventSource.close();
-                        
-                        // Exponential backoff for reconnection
-                        const delay = Math.min(
-                            this.baseReconnectDelay * Math.pow(2, this.reconnectAttempts),
-                            this.maxReconnectDelay
-                        );
-                        this.reconnectAttempts++;
-                        
-                        setTimeout(() => {
-                            console.log(`Attempting reconnect (attempt ${this.reconnectAttempts})`);
-                            this.connectSSE();
-                        }, delay);
-                    };
-
-                    // Handle sync events
-                    this.eventSource.addEventListener('sync_started', (event) => {
-                        const data = JSON.parse(event.data);
-                        this.showToast('Sync started for ' + data.repository, 'info');
-                        this.updateSyncStatus('started', data);
-                    });
-
-                    this.eventSource.addEventListener('sync_progress', (event) => {
-                        const data = JSON.parse(event.data);
-                        this.updateSyncStatus('progress', data);
-                    });
-
-                    this.eventSource.addEventListener('sync_completed', (event) => {
-                        const data = JSON.parse(event.data);
-                        this.showToast(`Sync completed: ${data.issues_synced} issues synced`, 'success');
-                        this.updateSyncStatus('completed', data);
-                        
-                        // Refresh issues list if on issues page
-                        if (window.location.pathname === '/issues') {
-                            this.refreshIssuesList();
-                        }
-                        
-                        // Update dashboard stats if on dashboard
-                        if (window.location.pathname === '/dashboard') {
-                            this.refreshDashboardStats();
-                        }
-                    });
-
-                    this.eventSource.addEventListener('issue_update', (event) => {
-                        const data = JSON.parse(event.data);
-                        const message = `Issue #${data.number}: ${data.title}`;
-                        this.showToast(message, 'info');
-                        
-                        // Show browser notification
-                        if (this.notificationPermission === 'granted' && data.action !== 'minor_update') {
-                            new Notification('Issue Update', {
-                                body: message,
-                                icon: '/favicon.ico',
-                                tag: 'issue-' + data.number
-                            });
-                        }
-                        
-                        // Update issue in list if visible
-                        this.updateIssueInList(data);
-                    });
-
-                    this.eventSource.addEventListener('connected', (event) => {
-                        console.log('SSE initial connection:', event.data);
-                    });
-
-                    this.eventSource.addEventListener('sync_status', (event) => {
-                        const data = JSON.parse(event.data);
-                        this.updateSyncStatus('status', data);
-                    });
-                },
-
-                showToast(message, type = 'info') {
-                    const toast = document.createElement('div');
-                    const bgColor = {
-                        'success': 'bg-green-500',
-                        'error': 'bg-red-500',
-                        'info': 'bg-blue-500',
-                        'warning': 'bg-yellow-500'
-                    }[type] || 'bg-gray-500';
-
-                    toast.className = `${bgColor} text-white px-4 py-3 rounded-lg shadow-lg transform transition-all duration-300 translate-x-full`;
-                    toast.innerHTML = `
-                        <div class="flex items-center gap-2">
-                            <span>${message}</span>
-                            <button onclick="this.parentElement.parentElement.remove()" class="ml-2 hover:opacity-75">
-                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
-                                </svg>
-                            </button>
-                        </div>
-                    `;
-
-                    const container = document.getElementById('toast-container');
-                    container.appendChild(toast);
-
-                    // Animate in
-                    setTimeout(() => {
-                        toast.classList.remove('translate-x-full');
-                        toast.classList.add('translate-x-0');
-                    }, 100);
-
-                    // Auto-remove after 5 seconds
-                    setTimeout(() => {
-                        toast.classList.add('translate-x-full');
-                        setTimeout(() => toast.remove(), 300);
-                    }, 5000);
-                },
-
-                updateSyncStatus(type, data) {
-                    // Update sync status UI elements
-                    const statusElement = document.getElementById('sync-status-live');
-                    if (statusElement) {
-                        if (type === 'started') {
-                            statusElement.innerHTML = `
-                                <div class="flex items-center gap-2 text-blue-600">
-                                    <svg class="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24">
-                                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                                    </svg>
-                                    <span>Syncing...</span>
-                                </div>
-                            `;
-                        } else if (type === 'progress') {
-                            const progress = data.progress || 0;
-                            statusElement.innerHTML = `
-                                <div class="w-full">
-                                    <div class="flex justify-between text-sm text-gray-600 mb-1">
-                                        <span>Syncing... ${data.current || 0}/${data.total || 0}</span>
-                                        <span>${progress}%</span>
-                                    </div>
-                                    <div class="w-full bg-gray-200 rounded-full h-2">
-                                        <div class="bg-blue-600 h-2 rounded-full transition-all duration-300" style="width: ${progress}%"></div>
-                                    </div>
-                                </div>
-                            `;
-                        } else if (type === 'completed') {
-                            statusElement.innerHTML = `
-                                <div class="flex items-center gap-2 text-green-600">
-                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
-                                    </svg>
-                                    <span>Sync completed - ${data.issues_synced} issues synced</span>
-                                </div>
-                            `;
-                            
-                            // Clear status after 5 seconds
-                            setTimeout(() => {
-                                statusElement.innerHTML = '';
-                            }, 5000);
-                        }
-                    }
-
-                    // Update last sync time
-                    const lastSyncElement = document.getElementById('last-sync-time');
-                    if (lastSyncElement && data.timestamp) {
-                        const date = new Date(data.timestamp);
-                        lastSyncElement.textContent = `Last sync: ${date.toLocaleString()}`;
-                    }
-                },
-
-                refreshIssuesList() {
-                    // Trigger HTMX to reload the issues list
-                    const issuesList = document.getElementById('issues-list');
-                    if (issuesList && issuesList.hasAttribute('hx-get')) {
-                        htmx.trigger(issuesList, 'refresh');
-                    }
-                },
-
-                refreshDashboardStats() {
-                    // Refresh dashboard statistics
-                    const statsElements = document.querySelectorAll('[data-refresh-on-sync]');
-                    statsElements.forEach(element => {
-                        if (element.hasAttribute('hx-get')) {
-                            htmx.trigger(element, 'refresh');
-                        }
-                    });
-                },
-
-                updateIssueInList(issueData) {
-                    // Find and update specific issue in the list
-                    const issueElement = document.querySelector(`[data-issue-number="${issueData.number}"]`);
-                    if (issueElement) {
-                        // Add highlight effect
-                        issueElement.classList.add('bg-yellow-50', 'transition-colors');
-                        setTimeout(() => {
-                            issueElement.classList.remove('bg-yellow-50');
-                        }, 2000);
-
-                        // Update issue state badge if changed
-                        const stateBadge = issueElement.querySelector('.issue-state-badge');
-                        if (stateBadge && issueData.state) {
-                            const stateClass = issueData.state === 'open' ? 
-                                'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800';
-                            stateBadge.className = `issue-state-badge px-2 py-1 text-xs rounded-full ${stateClass}`;
-                            stateBadge.textContent = issueData.state;
-                        }
-                    }
+                    
+                    // Store globally for debugging
+                    window.sseManager = state;
+                    
+                } catch (error) {
+                    console.error('Failed to create EventSource:', error);
+                    handleError();
                 }
             }
-        }
+            
+            // Initialize on DOMContentLoaded
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', () => {
+                    connect();
+                    
+                    // Handle page visibility changes
+                    document.addEventListener('visibilitychange', () => {
+                        if (document.hidden) {
+                            disconnect();
+                        } else {
+                            connect();
+                        }
+                    });
+                    
+                    // Clean up on page unload
+                    window.addEventListener('beforeunload', () => {
+                        disconnect();
+                    });
+                });
+            } else {
+                // DOM already loaded
+                connect();
+                
+                // Handle page visibility changes
+                document.addEventListener('visibilitychange', () => {
+                    if (document.hidden) {
+                        disconnect();
+                    } else {
+                        connect();
+                    }
+                });
+                
+                // Clean up on page unload
+                window.addEventListener('beforeunload', () => {
+                    disconnect();
+                });
+            }
+        })();
     </script>
+    {{end}}
 </body>
 </html>

@@ -12,10 +12,12 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"html"
 	"fmt"
 	"html/template"
 	"io"
 	"log"
+	"regexp"
 	"net/http"
 	"os"
 	"strconv"
@@ -2028,6 +2030,13 @@ func (app *App) handleAPIEpic(w http.ResponseWriter, r *http.Request) {
 }
 
 func (app *App) getEpics(w http.ResponseWriter, r *http.Request) {
+	// Get current user
+	user := app.getCurrentUser(r)
+	if user == nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	
 	query := `
 		SELECT 
 			e.id, e.title, e.description, e.status, e.color, e.owner,
@@ -2037,11 +2046,12 @@ func (app *App) getEpics(w http.ResponseWriter, r *http.Request) {
 		FROM epics e
 		LEFT JOIN issue_epics ie ON e.id = ie.epic_id
 		LEFT JOIN issues i ON ie.issue_id = i.id
+		WHERE e.user_id = ?
 		GROUP BY e.id
 		ORDER BY e.updated_at DESC
 	`
 	
-	rows, err := app.db.Query(query)
+	rows, err := app.db.Query(query, user.ID)
 	if err != nil {
 		http.Error(w, "Failed to fetch epics", http.StatusInternalServerError)
 		return
@@ -2059,34 +2069,20 @@ func (app *App) getEpics(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt         time.Time `json:"updated_at"`
 		IssueCount        int       `json:"issue_count"`
 		ClosedIssueCount  int       `json:"closed_issue_count"`
-		Progress          float64   `json:"progress"`
 	}
 	
 	var epics []Epic
 	for rows.Next() {
 		var epic Epic
-		var description, owner sql.NullString
-		
 		err := rows.Scan(
-			&epic.ID, &epic.Title, &description, &epic.Status, &epic.Color, &owner,
-			&epic.CreatedAt, &epic.UpdatedAt, &epic.IssueCount, &epic.ClosedIssueCount,
+			&epic.ID, &epic.Title, &epic.Description, &epic.Status,
+			&epic.Color, &epic.Owner, &epic.CreatedAt, &epic.UpdatedAt,
+			&epic.IssueCount, &epic.ClosedIssueCount,
 		)
 		if err != nil {
-			http.Error(w, "Failed to scan epic", http.StatusInternalServerError)
-			return
+			continue
 		}
 		
-		if description.Valid {
-			epic.Description = &description.String
-		}
-		if owner.Valid {
-			epic.Owner = &owner.String
-		}
-		
-		// Calculate progress
-		if epic.IssueCount > 0 {
-			epic.Progress = float64(epic.ClosedIssueCount) / float64(epic.IssueCount) * 100
-		}
 		
 		epics = append(epics, epic)
 	}
@@ -2095,7 +2091,69 @@ func (app *App) getEpics(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(epics)
 }
 
+
+
+// Security helper functions for input validation and sanitization
+
+// sanitizeInput removes dangerous characters and escapes HTML
+func sanitizeInput(s string) string {
+	// Remove null bytes and control characters
+	s = strings.ReplaceAll(s, "\x00", "")
+	s = strings.TrimSpace(s)
+	// HTML escape to prevent XSS
+	return html.EscapeString(s)
+}
+
+// isValidHexColor validates hex color format
+func isValidHexColor(color string) bool {
+	matched, _ := regexp.MatchString(`^#[0-9A-Fa-f]{6}$`, color)
+	return matched
+}
+
+// isValidEpicStatus validates epic status values
+func isValidEpicStatus(status string) bool {
+	validStatuses := []string{"active", "completed", "archived"}
+	for _, valid := range validStatuses {
+		if status == valid {
+			return true
+		}
+	}
+	return false
+}
+
+// isValidThemeStatus validates theme status values
+func isValidThemeStatus(status string) bool {
+	validStatuses := []string{"planned", "in_progress", "completed", "cancelled"}
+	for _, valid := range validStatuses {
+		if status == valid {
+			return true
+		}
+	}
+	return false
+}
+
 func (app *App) createEpic(w http.ResponseWriter, r *http.Request) {
+	// Get current user
+	user := app.getCurrentUser(r)
+	if user == nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	
+	// Validate CSRF token
+	cookie, _ := r.Cookie("session")
+	if cookie != nil {
+		csrfToken := r.Header.Get("X-CSRF-Token")
+		if csrfToken == "" {
+			csrfToken = r.FormValue("csrf_token")
+		}
+		
+		if !app.validateCSRFToken(r, csrfToken) {
+			http.Error(w, "Invalid CSRF token", http.StatusForbidden)
+			return
+		}
+	}
+	
 	var input struct {
 		Title       string  `json:"title"`
 		Description string  `json:"description"`
@@ -2109,25 +2167,47 @@ func (app *App) createEpic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
-	// Validate input
+	// Sanitize and validate input
+	input.Title = sanitizeInput(input.Title)
+	input.Description = sanitizeInput(input.Description)
+	input.Owner = sanitizeInput(input.Owner)
+	
+	// Validate required fields
 	if input.Title == "" {
 		http.Error(w, "Title is required", http.StatusBadRequest)
 		return
 	}
 	
-	// Set defaults
-	if input.Color == "" {
-		input.Color = "#3B82F6"
-	}
-	if input.Status == "" {
-		input.Status = "active"
+	if len(input.Title) > 200 {
+		http.Error(w, "Title must be less than 200 characters", http.StatusBadRequest)
+		return
 	}
 	
-	// Insert epic
+	if len(input.Description) > 5000 {
+		http.Error(w, "Description must be less than 5000 characters", http.StatusBadRequest)
+		return
+	}
+	
+	// Set defaults and validate
+	if input.Color == "" {
+		input.Color = "#3B82F6"
+	} else if !isValidHexColor(input.Color) {
+		http.Error(w, "Invalid color format", http.StatusBadRequest)
+		return
+	}
+	
+	if input.Status == "" {
+		input.Status = "active"
+	} else if !isValidEpicStatus(input.Status) {
+		http.Error(w, "Invalid status value", http.StatusBadRequest)
+		return
+	}
+	
+	// Insert epic with user_id
 	result, err := app.db.Exec(`
-		INSERT INTO epics (title, description, color, owner, status)
-		VALUES (?, ?, ?, ?, ?)
-	`, input.Title, input.Description, input.Color, input.Owner, input.Status)
+		INSERT INTO epics (user_id, title, description, color, owner, status)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, user.ID, input.Title, input.Description, input.Color, input.Owner, input.Status)
 	
 	if err != nil {
 		http.Error(w, "Failed to create epic", http.StatusInternalServerError)
@@ -2142,6 +2222,7 @@ func (app *App) createEpic(w http.ResponseWriter, r *http.Request) {
 		"message": "Epic created successfully",
 	})
 }
+
 
 func (app *App) getEpic(w http.ResponseWriter, r *http.Request, epicID int64) {
 	// Get epic details with associated issues
@@ -2236,12 +2317,30 @@ func (app *App) getEpic(w http.ResponseWriter, r *http.Request, epicID int64) {
 }
 
 func (app *App) updateEpic(w http.ResponseWriter, r *http.Request, epicID int64) {
+	// Get current user
+	user := app.getCurrentUser(r)
+	if user == nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	
+	// Validate CSRF token
+	csrfToken := r.Header.Get("X-CSRF-Token")
+	if csrfToken == "" {
+		csrfToken = r.FormValue("csrf_token")
+	}
+	
+	if !app.validateCSRFToken(r, csrfToken) {
+		http.Error(w, "Invalid CSRF token", http.StatusForbidden)
+		return
+	}
+	
 	var input struct {
-		Title       string `json:"title"`
-		Description string `json:"description"`
-		Color       string `json:"color"`
-		Owner       string `json:"owner"`
-		Status      string `json:"status"`
+		Title       string  `json:"title"`
+		Description string  `json:"description"`
+		Color       string  `json:"color"`
+		Owner       string  `json:"owner"`
+		Status      string  `json:"status"`
 	}
 	
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
@@ -2249,35 +2348,91 @@ func (app *App) updateEpic(w http.ResponseWriter, r *http.Request, epicID int64)
 		return
 	}
 	
-	_, err := app.db.Exec(`
-		UPDATE epics 
-		SET title = ?, description = ?, color = ?, owner = ?, status = ?, updated_at = CURRENT_TIMESTAMP
-		WHERE id = ?
-	`, input.Title, input.Description, input.Color, input.Owner, input.Status, epicID)
+	// Sanitize and validate input
+	input.Title = sanitizeInput(input.Title)
+	input.Description = sanitizeInput(input.Description)
+	input.Owner = sanitizeInput(input.Owner)
 	
-	if err != nil {
-		http.Error(w, "Failed to update epic", http.StatusInternalServerError)
+	if input.Title == "" {
+		http.Error(w, "Title is required", http.StatusBadRequest)
 		return
 	}
 	
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
-		"message": "Epic updated successfully",
-	})
+	if len(input.Title) > 200 {
+		http.Error(w, "Title must be less than 200 characters", http.StatusBadRequest)
+		return
+	}
+	
+	if len(input.Description) > 5000 {
+		http.Error(w, "Description must be less than 5000 characters", http.StatusBadRequest)
+		return
+	}
+	
+	if input.Color != "" && !isValidHexColor(input.Color) {
+		http.Error(w, "Invalid color format", http.StatusBadRequest)
+		return
+	}
+	
+	if input.Status != "" && !isValidEpicStatus(input.Status) {
+		http.Error(w, "Invalid status value", http.StatusBadRequest)
+		return
+	}
+	
+	// Update epic - only if owned by user
+	_, err := app.db.Exec(`
+		UPDATE epics 
+		SET title = ?, description = ?, color = ?, owner = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ? AND user_id = ?
+	`, input.Title, input.Description, input.Color, input.Owner, input.Status, epicID, user.ID)
+	
+	if err != nil {
+		http.Error(w, "Failed to update epic or access denied", http.StatusInternalServerError)
+		return
+	}
+	
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "updated"})
 }
 
+
 func (app *App) deleteEpic(w http.ResponseWriter, r *http.Request, epicID int64) {
-	_, err := app.db.Exec("DELETE FROM epics WHERE id = ?", epicID)
+	// Get current user
+	user := app.getCurrentUser(r)
+	if user == nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	
+	// Validate CSRF token
+	csrfToken := r.Header.Get("X-CSRF-Token")
+	if csrfToken == "" {
+		csrfToken = r.FormValue("csrf_token")
+	}
+	
+	if !app.validateCSRFToken(r, csrfToken) {
+		http.Error(w, "Invalid CSRF token", http.StatusForbidden)
+		return
+	}
+	
+	// Delete only if owned by user
+	result, err := app.db.Exec(`
+		DELETE FROM epics WHERE id = ? AND user_id = ?
+	`, epicID, user.ID)
+	
 	if err != nil {
 		http.Error(w, "Failed to delete epic", http.StatusInternalServerError)
 		return
 	}
 	
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
-		"message": "Epic deleted successfully",
-	})
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected == 0 {
+		http.Error(w, "Epic not found or access denied", http.StatusNotFound)
+		return
+	}
+	
+	w.WriteHeader(http.StatusNoContent)
 }
+
 
 func (app *App) assignIssueToEpic(w http.ResponseWriter, r *http.Request, epicID int64) {
 	var input struct {
@@ -2443,11 +2598,29 @@ func (app *App) getThemes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (app *App) createTheme(w http.ResponseWriter, r *http.Request) {
+	// Get current user
+	user := app.getCurrentUser(r)
+	if user == nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	
+	// Validate CSRF token
+	csrfToken := r.Header.Get("X-CSRF-Token")
+	if csrfToken == "" {
+		csrfToken = r.FormValue("csrf_token")
+	}
+	
+	if !app.validateCSRFToken(r, csrfToken) {
+		http.Error(w, "Invalid CSRF token", http.StatusForbidden)
+		return
+	}
+	
 	var input struct {
-		Name        string `json:"name"`
-		Description string `json:"description"`
-		Quarter     string `json:"quarter"`
-		Status      string `json:"status"`
+		Name        string  `json:"name"`
+		Description string  `json:"description"`
+		Quarter     string  `json:"quarter"`
+		Status      string  `json:"status"`
 	}
 	
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
@@ -2455,22 +2628,38 @@ func (app *App) createTheme(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
-	// Validate input
+	// Sanitize and validate input
+	input.Name = sanitizeInput(input.Name)
+	input.Description = sanitizeInput(input.Description)
+	input.Quarter = sanitizeInput(input.Quarter)
+	
 	if input.Name == "" {
 		http.Error(w, "Name is required", http.StatusBadRequest)
 		return
 	}
 	
-	// Set defaults
-	if input.Status == "" {
-		input.Status = "planned"
+	if len(input.Name) > 200 {
+		http.Error(w, "Name must be less than 200 characters", http.StatusBadRequest)
+		return
 	}
 	
-	// Insert theme
+	if len(input.Description) > 5000 {
+		http.Error(w, "Description must be less than 5000 characters", http.StatusBadRequest)
+		return
+	}
+	
+	if input.Status == "" {
+		input.Status = "planned"
+	} else if !isValidThemeStatus(input.Status) {
+		http.Error(w, "Invalid status value", http.StatusBadRequest)
+		return
+	}
+	
+	// Insert theme with user_id
 	result, err := app.db.Exec(`
-		INSERT INTO themes (name, description, quarter, status)
-		VALUES (?, ?, ?, ?)
-	`, input.Name, input.Description, input.Quarter, input.Status)
+		INSERT INTO themes (user_id, name, description, quarter, status)
+		VALUES (?, ?, ?, ?, ?)
+	`, user.ID, input.Name, input.Description, input.Quarter, input.Status)
 	
 	if err != nil {
 		http.Error(w, "Failed to create theme", http.StatusInternalServerError)
@@ -2485,6 +2674,7 @@ func (app *App) createTheme(w http.ResponseWriter, r *http.Request) {
 		"message": "Theme created successfully",
 	})
 }
+
 
 func (app *App) getTheme(w http.ResponseWriter, r *http.Request, themeID int64) {
 	// Get theme details with associated epics
@@ -2609,17 +2799,43 @@ func (app *App) updateTheme(w http.ResponseWriter, r *http.Request, themeID int6
 }
 
 func (app *App) deleteTheme(w http.ResponseWriter, r *http.Request, themeID int64) {
-	_, err := app.db.Exec("DELETE FROM themes WHERE id = ?", themeID)
+	// Get current user
+	user := app.getCurrentUser(r)
+	if user == nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	
+	// Validate CSRF token
+	csrfToken := r.Header.Get("X-CSRF-Token")
+	if csrfToken == "" {
+		csrfToken = r.FormValue("csrf_token")
+	}
+	
+	if !app.validateCSRFToken(r, csrfToken) {
+		http.Error(w, "Invalid CSRF token", http.StatusForbidden)
+		return
+	}
+	
+	// Delete only if owned by user
+	result, err := app.db.Exec(`
+		DELETE FROM themes WHERE id = ? AND user_id = ?
+	`, themeID, user.ID)
+	
 	if err != nil {
 		http.Error(w, "Failed to delete theme", http.StatusInternalServerError)
 		return
 	}
 	
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
-		"message": "Theme deleted successfully",
-	})
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected == 0 {
+		http.Error(w, "Theme not found or access denied", http.StatusNotFound)
+		return
+	}
+	
+	w.WriteHeader(http.StatusNoContent)
 }
+
 
 func (app *App) assignEpicToTheme(w http.ResponseWriter, r *http.Request, themeID int64) {
 	var input struct {
@@ -2967,13 +3183,15 @@ func runMigrations(db *sql.DB) {
 	-- Epic and Theme tables for product features
 	CREATE TABLE IF NOT EXISTS epics (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		user_id INTEGER NOT NULL DEFAULT 1,
 		title TEXT NOT NULL,
 		description TEXT,
 		status TEXT DEFAULT 'active' CHECK (status IN ('active', 'completed', 'archived')),
 		color TEXT DEFAULT '#3B82F6',
 		owner TEXT,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 	);
 
 	CREATE TABLE IF NOT EXISTS issue_epics (
@@ -2987,12 +3205,14 @@ func runMigrations(db *sql.DB) {
 
 	CREATE TABLE IF NOT EXISTS themes (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		user_id INTEGER NOT NULL DEFAULT 1,
 		name TEXT NOT NULL,
 		description TEXT,
 		quarter TEXT,
 		status TEXT DEFAULT 'planned' CHECK (status IN ('planned', 'in_progress', 'completed', 'cancelled')),
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 	);
 
 	CREATE TABLE IF NOT EXISTS epic_themes (

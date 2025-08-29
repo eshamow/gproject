@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,16 +13,25 @@ import (
 
 // Helper function to create an authenticated test user and session
 func createTestUserSession(t *testing.T, app *App) (userID int64, sessionID string, csrfToken string) {
-	userID = int64(123)
+	// Generate unique IDs to avoid conflicts
+	githubID := time.Now().UnixNano() % 1000000
+	email := fmt.Sprintf("test%d@example.com", githubID)
+	login := fmt.Sprintf("testuser%d", githubID)
+	
 	encryptedToken, _ := app.encryptToken("test-token")
 	
-	// Create test user
-	_, err := app.db.Exec(`
-		INSERT INTO users (id, github_id, github_login, email, name, avatar_url, access_token)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		userID, 456, "testuser", "test@example.com", "Test User", "http://avatar.url", encryptedToken)
+	// Create test user (let database auto-generate ID)
+	result, err := app.db.Exec(`
+		INSERT INTO users (github_id, github_login, email, name, avatar_url, access_token)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		githubID, login, email, "Test User", "http://avatar.url", encryptedToken)
 	if err != nil {
 		t.Fatalf("Failed to create test user: %v", err)
+	}
+	
+	userID, err = result.LastInsertId()
+	if err != nil {
+		t.Fatalf("Failed to get user ID: %v", err)
 	}
 	
 	// Create session

@@ -7,7 +7,58 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
+
+// Helper function to create an authenticated test user and session
+func createTestUserSession(t *testing.T, app *App) (userID int64, sessionID string, csrfToken string) {
+	userID = int64(123)
+	encryptedToken, _ := app.encryptToken("test-token")
+	
+	// Create test user
+	_, err := app.db.Exec(`
+		INSERT INTO users (id, github_id, github_login, email, name, avatar_url, access_token)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		userID, 456, "testuser", "test@example.com", "Test User", "http://avatar.url", encryptedToken)
+	if err != nil {
+		t.Fatalf("Failed to create test user: %v", err)
+	}
+	
+	// Create session
+	sessionID = generateRandomString(32)
+	expiresAt := time.Now().Add(24 * time.Hour)
+	_, err = app.db.Exec(`
+		INSERT INTO sessions (id, user_id, expires_at, created_at)
+		VALUES (?, ?, ?, ?)`,
+		sessionID, userID, expiresAt, time.Now())
+	if err != nil {
+		t.Fatalf("Failed to create session: %v", err)
+	}
+	
+	// Create CSRF token
+	csrfToken = generateRandomString(32)
+	_, err = app.db.Exec(`
+		INSERT INTO csrf_tokens (session_id, token, expires_at)
+		VALUES (?, ?, ?)`,
+		sessionID, csrfToken, expiresAt)
+	if err != nil {
+		t.Fatalf("Failed to create CSRF token: %v", err)
+	}
+	
+	return userID, sessionID, csrfToken
+}
+
+// Helper function to add authentication to a request
+func addAuthToRequest(req *http.Request, sessionID string, csrfToken string) {
+	// Add session cookie
+	req.AddCookie(&http.Cookie{
+		Name:  "session",
+		Value: sessionID,
+	})
+	
+	// Add CSRF token header
+	req.Header.Set("X-CSRF-Token", csrfToken)
+}
 
 func TestEpicsCRUD(t *testing.T) {
 	// Setup test database
@@ -20,23 +71,30 @@ func TestEpicsCRUD(t *testing.T) {
 	// Run migrations
 	runMigrations(db)
 	
-	// Create test app
+	// Create test app with required config
 	app := &App{
 		db:          db,
 		rateLimiter: NewRateLimiter(),
+		config: Config{
+			SessionSecret: "test-secret-key-for-testing-only",
+		},
 	}
+	
+	// Create authenticated test user
+	_, sessionID, csrfToken := createTestUserSession(t, app)
 	
 	// Test creating an epic
 	t.Run("CreateEpic", func(t *testing.T) {
 		body := `{"title":"Test Epic","description":"Test Description","color":"#FF0000","owner":"testuser","status":"active"}`
 		req := httptest.NewRequest("POST", "/api/epics", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
+		addAuthToRequest(req, sessionID, csrfToken)
 		w := httptest.NewRecorder()
 		
 		app.handleAPIEpics(w, req)
 		
 		if w.Code != http.StatusOK {
-			t.Errorf("Expected status 200, got %d", w.Code)
+			t.Errorf("Expected status 200, got %d: %s", w.Code, w.Body.String())
 		}
 		
 		var response map[string]interface{}
@@ -47,9 +105,10 @@ func TestEpicsCRUD(t *testing.T) {
 		}
 	})
 	
-	// Test getting epics
+	// Test getting epics  
 	t.Run("GetEpics", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/api/epics", nil)
+		addAuthToRequest(req, sessionID, csrfToken)
 		w := httptest.NewRecorder()
 		
 		app.handleAPIEpics(w, req)
@@ -78,17 +137,24 @@ func TestThemesCRUD(t *testing.T) {
 	// Run migrations
 	runMigrations(db)
 	
-	// Create test app
+	// Create test app with required config
 	app := &App{
 		db:          db,
 		rateLimiter: NewRateLimiter(),
+		config: Config{
+			SessionSecret: "test-secret-key-for-testing-only",
+		},
 	}
+	
+	// Create authenticated test user
+	_, sessionID, csrfToken := createTestUserSession(t, app)
 	
 	// Test creating a theme
 	t.Run("CreateTheme", func(t *testing.T) {
 		body := `{"name":"Q1 Goals","description":"First quarter objectives","quarter":"2025-Q1","status":"planned"}`
 		req := httptest.NewRequest("POST", "/api/themes", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
+		addAuthToRequest(req, sessionID, csrfToken)
 		w := httptest.NewRecorder()
 		
 		app.handleAPIThemes(w, req)
@@ -108,6 +174,7 @@ func TestThemesCRUD(t *testing.T) {
 	// Test getting themes
 	t.Run("GetThemes", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/api/themes", nil)
+		addAuthToRequest(req, sessionID, csrfToken)
 		w := httptest.NewRecorder()
 		
 		app.handleAPIThemes(w, req)

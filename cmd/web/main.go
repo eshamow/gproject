@@ -167,7 +167,7 @@ func main() {
 	templates := make(map[string]*template.Template)
 	
 	// List of page templates
-	pages := []string{"home.html", "dashboard.html", "issues.html"}
+	pages := []string{"home.html", "dashboard.html", "issues.html", "epics.html", "themes.html", "reports.html"}
 	
 	for _, page := range pages {
 		// Parse base.html and the specific page template together
@@ -196,12 +196,22 @@ func main() {
 	mux.HandleFunc("/dashboard", app.requireAuth(app.handleDashboard))
 	mux.HandleFunc("/issues", app.requireAuth(app.handleIssues))
 	mux.HandleFunc("/sync", app.requireAuth(app.handleSync))
+	mux.HandleFunc("/epics", app.requireAuth(app.handleEpics))
+	mux.HandleFunc("/themes", app.requireAuth(app.handleThemes))
+	mux.HandleFunc("/reports", app.requireAuth(app.handleReports))
 	
 	// API endpoints for issues
 	mux.HandleFunc("/api/issues", app.requireAuth(app.handleAPIIssues))
 	mux.HandleFunc("/api/issues/search", app.requireAuth(app.handleAPIIssuesSearch))
 	mux.HandleFunc("/api/sync/status", app.requireAuth(app.handleAPISyncStatus))
 	mux.HandleFunc("/api/dashboard-stats", app.requireAuth(app.handleAPIDashboardStats))
+	
+	// Week 3-4: Epic and Theme management
+	mux.HandleFunc("/api/epics", app.requireAuth(app.handleAPIEpics))
+	mux.HandleFunc("/api/epics/", app.requireAuth(app.handleAPIEpic))
+	mux.HandleFunc("/api/themes", app.requireAuth(app.handleAPIThemes))
+	mux.HandleFunc("/api/themes/", app.requireAuth(app.handleAPITheme))
+	mux.HandleFunc("/api/reports", app.requireAuth(app.handleAPIReports))
 	
 	// Week 2: Real-time features
 	mux.HandleFunc("/webhook/github", app.handleWebhook)
@@ -231,6 +241,12 @@ func main() {
 }
 
 func (app *App) handleHome(w http.ResponseWriter, r *http.Request) {
+	// Only handle exact "/" path, not all unmatched paths
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	
 	user := app.getCurrentUser(r)
 	
 	if user != nil {
@@ -1068,7 +1084,12 @@ func (app *App) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		log.Printf("Validating webhook signature: %s...", signature[:30])
+		// Safely truncate signature for logging
+		truncatedSig := signature
+		if len(signature) > 30 {
+			truncatedSig = signature[:30] + "..."
+		}
+		log.Printf("Validating webhook signature: %s", truncatedSig)
 		if !app.validateWebhookSignature(payload, signature) {
 			log.Printf("Webhook rejected: invalid signature")
 			// Log additional debugging info
@@ -1916,6 +1937,935 @@ func (app *App) cleanupExpiredSessions() {
 	}
 }
 
+// Epic and Theme Management Handlers
+
+func (app *App) handleEpics(w http.ResponseWriter, r *http.Request) {
+	user := app.getCurrentUser(r)
+	
+	data := map[string]interface{}{
+		"User": user,
+	}
+	
+	if err := app.templates["epics.html"].ExecuteTemplate(w, "base.html", data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (app *App) handleThemes(w http.ResponseWriter, r *http.Request) {
+	user := app.getCurrentUser(r)
+	
+	data := map[string]interface{}{
+		"User": user,
+	}
+	
+	if err := app.templates["themes.html"].ExecuteTemplate(w, "base.html", data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (app *App) handleReports(w http.ResponseWriter, r *http.Request) {
+	user := app.getCurrentUser(r)
+	
+	data := map[string]interface{}{
+		"User": user,
+	}
+	
+	if err := app.templates["reports.html"].ExecuteTemplate(w, "base.html", data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+// API: Epic Management
+func (app *App) handleAPIEpics(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		app.getEpics(w, r)
+	case http.MethodPost:
+		app.createEpic(w, r)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (app *App) handleAPIEpic(w http.ResponseWriter, r *http.Request) {
+	// Extract epic ID from path
+	path := r.URL.Path
+	parts := strings.Split(strings.TrimPrefix(path, "/api/epics/"), "/")
+	if len(parts) < 1 || parts[0] == "" {
+		http.Error(w, "Epic ID required", http.StatusBadRequest)
+		return
+	}
+	
+	epicID, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid epic ID", http.StatusBadRequest)
+		return
+	}
+	
+	// Handle issue assignment to epic
+	if len(parts) > 1 && parts[1] == "issues" {
+		switch r.Method {
+		case http.MethodPost:
+			app.assignIssueToEpic(w, r, epicID)
+		case http.MethodDelete:
+			app.removeIssueFromEpic(w, r, epicID)
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+		return
+	}
+	
+	switch r.Method {
+	case http.MethodGet:
+		app.getEpic(w, r, epicID)
+	case http.MethodPut:
+		app.updateEpic(w, r, epicID)
+	case http.MethodDelete:
+		app.deleteEpic(w, r, epicID)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (app *App) getEpics(w http.ResponseWriter, r *http.Request) {
+	query := `
+		SELECT 
+			e.id, e.title, e.description, e.status, e.color, e.owner,
+			e.created_at, e.updated_at,
+			COUNT(DISTINCT ie.issue_id) as issue_count,
+			COUNT(DISTINCT CASE WHEN i.state = 'closed' THEN ie.issue_id END) as closed_issue_count
+		FROM epics e
+		LEFT JOIN issue_epics ie ON e.id = ie.epic_id
+		LEFT JOIN issues i ON ie.issue_id = i.id
+		GROUP BY e.id
+		ORDER BY e.updated_at DESC
+	`
+	
+	rows, err := app.db.Query(query)
+	if err != nil {
+		http.Error(w, "Failed to fetch epics", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	
+	type Epic struct {
+		ID                int64     `json:"id"`
+		Title             string    `json:"title"`
+		Description       *string   `json:"description"`
+		Status            string    `json:"status"`
+		Color             string    `json:"color"`
+		Owner             *string   `json:"owner"`
+		CreatedAt         time.Time `json:"created_at"`
+		UpdatedAt         time.Time `json:"updated_at"`
+		IssueCount        int       `json:"issue_count"`
+		ClosedIssueCount  int       `json:"closed_issue_count"`
+		Progress          float64   `json:"progress"`
+	}
+	
+	var epics []Epic
+	for rows.Next() {
+		var epic Epic
+		var description, owner sql.NullString
+		
+		err := rows.Scan(
+			&epic.ID, &epic.Title, &description, &epic.Status, &epic.Color, &owner,
+			&epic.CreatedAt, &epic.UpdatedAt, &epic.IssueCount, &epic.ClosedIssueCount,
+		)
+		if err != nil {
+			http.Error(w, "Failed to scan epic", http.StatusInternalServerError)
+			return
+		}
+		
+		if description.Valid {
+			epic.Description = &description.String
+		}
+		if owner.Valid {
+			epic.Owner = &owner.String
+		}
+		
+		// Calculate progress
+		if epic.IssueCount > 0 {
+			epic.Progress = float64(epic.ClosedIssueCount) / float64(epic.IssueCount) * 100
+		}
+		
+		epics = append(epics, epic)
+	}
+	
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(epics)
+}
+
+func (app *App) createEpic(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Title       string  `json:"title"`
+		Description string  `json:"description"`
+		Color       string  `json:"color"`
+		Owner       string  `json:"owner"`
+		Status      string  `json:"status"`
+	}
+	
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		http.Error(w, "Invalid input", http.StatusBadRequest)
+		return
+	}
+	
+	// Validate input
+	if input.Title == "" {
+		http.Error(w, "Title is required", http.StatusBadRequest)
+		return
+	}
+	
+	// Set defaults
+	if input.Color == "" {
+		input.Color = "#3B82F6"
+	}
+	if input.Status == "" {
+		input.Status = "active"
+	}
+	
+	// Insert epic
+	result, err := app.db.Exec(`
+		INSERT INTO epics (title, description, color, owner, status)
+		VALUES (?, ?, ?, ?, ?)
+	`, input.Title, input.Description, input.Color, input.Owner, input.Status)
+	
+	if err != nil {
+		http.Error(w, "Failed to create epic", http.StatusInternalServerError)
+		return
+	}
+	
+	epicID, _ := result.LastInsertId()
+	
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"id": epicID,
+		"message": "Epic created successfully",
+	})
+}
+
+func (app *App) getEpic(w http.ResponseWriter, r *http.Request, epicID int64) {
+	// Get epic details with associated issues
+	var epic struct {
+		ID          int64     `json:"id"`
+		Title       string    `json:"title"`
+		Description *string   `json:"description"`
+		Status      string    `json:"status"`
+		Color       string    `json:"color"`
+		Owner       *string   `json:"owner"`
+		CreatedAt   time.Time `json:"created_at"`
+		UpdatedAt   time.Time `json:"updated_at"`
+	}
+	
+	var description, owner sql.NullString
+	err := app.db.QueryRow(`
+		SELECT id, title, description, status, color, owner, created_at, updated_at
+		FROM epics WHERE id = ?
+	`, epicID).Scan(
+		&epic.ID, &epic.Title, &description, &epic.Status, 
+		&epic.Color, &owner, &epic.CreatedAt, &epic.UpdatedAt,
+	)
+	
+	if err == sql.ErrNoRows {
+		http.Error(w, "Epic not found", http.StatusNotFound)
+		return
+	} else if err != nil {
+		http.Error(w, "Failed to fetch epic", http.StatusInternalServerError)
+		return
+	}
+	
+	if description.Valid {
+		epic.Description = &description.String
+	}
+	if owner.Valid {
+		epic.Owner = &owner.String
+	}
+	
+	// Get associated issues
+	rows, err := app.db.Query(`
+		SELECT i.id, i.github_id, i.number, i.title, i.state, i.labels, i.assignee, i.author
+		FROM issues i
+		JOIN issue_epics ie ON i.id = ie.issue_id
+		WHERE ie.epic_id = ?
+		ORDER BY i.updated_at DESC
+	`, epicID)
+	
+	if err != nil {
+		http.Error(w, "Failed to fetch epic issues", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	
+	type Issue struct {
+		ID       int64   `json:"id"`
+		GitHubID int64   `json:"github_id"`
+		Number   int     `json:"number"`
+		Title    string  `json:"title"`
+		State    string  `json:"state"`
+		Labels   string  `json:"labels"`
+		Assignee *string `json:"assignee"`
+		Author   string  `json:"author"`
+	}
+	
+	var issues []Issue
+	for rows.Next() {
+		var issue Issue
+		var assignee sql.NullString
+		
+		err := rows.Scan(
+			&issue.ID, &issue.GitHubID, &issue.Number, &issue.Title,
+			&issue.State, &issue.Labels, &assignee, &issue.Author,
+		)
+		if err != nil {
+			continue
+		}
+		
+		if assignee.Valid {
+			issue.Assignee = &assignee.String
+		}
+		
+		issues = append(issues, issue)
+	}
+	
+	response := map[string]interface{}{
+		"epic":   epic,
+		"issues": issues,
+	}
+	
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+func (app *App) updateEpic(w http.ResponseWriter, r *http.Request, epicID int64) {
+	var input struct {
+		Title       string `json:"title"`
+		Description string `json:"description"`
+		Color       string `json:"color"`
+		Owner       string `json:"owner"`
+		Status      string `json:"status"`
+	}
+	
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		http.Error(w, "Invalid input", http.StatusBadRequest)
+		return
+	}
+	
+	_, err := app.db.Exec(`
+		UPDATE epics 
+		SET title = ?, description = ?, color = ?, owner = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, input.Title, input.Description, input.Color, input.Owner, input.Status, epicID)
+	
+	if err != nil {
+		http.Error(w, "Failed to update epic", http.StatusInternalServerError)
+		return
+	}
+	
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"message": "Epic updated successfully",
+	})
+}
+
+func (app *App) deleteEpic(w http.ResponseWriter, r *http.Request, epicID int64) {
+	_, err := app.db.Exec("DELETE FROM epics WHERE id = ?", epicID)
+	if err != nil {
+		http.Error(w, "Failed to delete epic", http.StatusInternalServerError)
+		return
+	}
+	
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"message": "Epic deleted successfully",
+	})
+}
+
+func (app *App) assignIssueToEpic(w http.ResponseWriter, r *http.Request, epicID int64) {
+	var input struct {
+		IssueID int64 `json:"issue_id"`
+	}
+	
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		http.Error(w, "Invalid input", http.StatusBadRequest)
+		return
+	}
+	
+	_, err := app.db.Exec(`
+		INSERT OR IGNORE INTO issue_epics (issue_id, epic_id) VALUES (?, ?)
+	`, input.IssueID, epicID)
+	
+	if err != nil {
+		http.Error(w, "Failed to assign issue to epic", http.StatusInternalServerError)
+		return
+	}
+	
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"message": "Issue assigned to epic",
+	})
+}
+
+func (app *App) removeIssueFromEpic(w http.ResponseWriter, r *http.Request, epicID int64) {
+	issueIDStr := r.URL.Query().Get("issue_id")
+	if issueIDStr == "" {
+		http.Error(w, "Issue ID required", http.StatusBadRequest)
+		return
+	}
+	
+	issueID, err := strconv.ParseInt(issueIDStr, 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid issue ID", http.StatusBadRequest)
+		return
+	}
+	
+	_, err = app.db.Exec(`
+		DELETE FROM issue_epics WHERE issue_id = ? AND epic_id = ?
+	`, issueID, epicID)
+	
+	if err != nil {
+		http.Error(w, "Failed to remove issue from epic", http.StatusInternalServerError)
+		return
+	}
+	
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"message": "Issue removed from epic",
+	})
+}
+
+// API: Theme Management
+func (app *App) handleAPIThemes(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		app.getThemes(w, r)
+	case http.MethodPost:
+		app.createTheme(w, r)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (app *App) handleAPITheme(w http.ResponseWriter, r *http.Request) {
+	// Extract theme ID from path
+	path := r.URL.Path
+	parts := strings.Split(strings.TrimPrefix(path, "/api/themes/"), "/")
+	if len(parts) < 1 || parts[0] == "" {
+		http.Error(w, "Theme ID required", http.StatusBadRequest)
+		return
+	}
+	
+	themeID, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid theme ID", http.StatusBadRequest)
+		return
+	}
+	
+	// Handle epic assignment to theme
+	if len(parts) > 1 && parts[1] == "epics" {
+		switch r.Method {
+		case http.MethodPost:
+			app.assignEpicToTheme(w, r, themeID)
+		case http.MethodDelete:
+			app.removeEpicFromTheme(w, r, themeID)
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+		return
+	}
+	
+	switch r.Method {
+	case http.MethodGet:
+		app.getTheme(w, r, themeID)
+	case http.MethodPut:
+		app.updateTheme(w, r, themeID)
+	case http.MethodDelete:
+		app.deleteTheme(w, r, themeID)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (app *App) getThemes(w http.ResponseWriter, r *http.Request) {
+	query := `
+		SELECT 
+			t.id, t.name, t.description, t.quarter, t.status,
+			t.created_at, t.updated_at,
+			COUNT(DISTINCT et.epic_id) as epic_count
+		FROM themes t
+		LEFT JOIN epic_themes et ON t.id = et.theme_id
+		GROUP BY t.id
+		ORDER BY t.quarter DESC, t.updated_at DESC
+	`
+	
+	rows, err := app.db.Query(query)
+	if err != nil {
+		http.Error(w, "Failed to fetch themes", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	
+	type Theme struct {
+		ID          int64     `json:"id"`
+		Name        string    `json:"name"`
+		Description *string   `json:"description"`
+		Quarter     *string   `json:"quarter"`
+		Status      string    `json:"status"`
+		CreatedAt   time.Time `json:"created_at"`
+		UpdatedAt   time.Time `json:"updated_at"`
+		EpicCount   int       `json:"epic_count"`
+	}
+	
+	var themes []Theme
+	for rows.Next() {
+		var theme Theme
+		var description, quarter sql.NullString
+		
+		err := rows.Scan(
+			&theme.ID, &theme.Name, &description, &quarter, &theme.Status,
+			&theme.CreatedAt, &theme.UpdatedAt, &theme.EpicCount,
+		)
+		if err != nil {
+			http.Error(w, "Failed to scan theme", http.StatusInternalServerError)
+			return
+		}
+		
+		if description.Valid {
+			theme.Description = &description.String
+		}
+		if quarter.Valid {
+			theme.Quarter = &quarter.String
+		}
+		
+		themes = append(themes, theme)
+	}
+	
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(themes)
+}
+
+func (app *App) createTheme(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Quarter     string `json:"quarter"`
+		Status      string `json:"status"`
+	}
+	
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		http.Error(w, "Invalid input", http.StatusBadRequest)
+		return
+	}
+	
+	// Validate input
+	if input.Name == "" {
+		http.Error(w, "Name is required", http.StatusBadRequest)
+		return
+	}
+	
+	// Set defaults
+	if input.Status == "" {
+		input.Status = "planned"
+	}
+	
+	// Insert theme
+	result, err := app.db.Exec(`
+		INSERT INTO themes (name, description, quarter, status)
+		VALUES (?, ?, ?, ?)
+	`, input.Name, input.Description, input.Quarter, input.Status)
+	
+	if err != nil {
+		http.Error(w, "Failed to create theme", http.StatusInternalServerError)
+		return
+	}
+	
+	themeID, _ := result.LastInsertId()
+	
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"id": themeID,
+		"message": "Theme created successfully",
+	})
+}
+
+func (app *App) getTheme(w http.ResponseWriter, r *http.Request, themeID int64) {
+	// Get theme details with associated epics
+	var theme struct {
+		ID          int64     `json:"id"`
+		Name        string    `json:"name"`
+		Description *string   `json:"description"`
+		Quarter     *string   `json:"quarter"`
+		Status      string    `json:"status"`
+		CreatedAt   time.Time `json:"created_at"`
+		UpdatedAt   time.Time `json:"updated_at"`
+	}
+	
+	var description, quarter sql.NullString
+	err := app.db.QueryRow(`
+		SELECT id, name, description, quarter, status, created_at, updated_at
+		FROM themes WHERE id = ?
+	`, themeID).Scan(
+		&theme.ID, &theme.Name, &description, &quarter,
+		&theme.Status, &theme.CreatedAt, &theme.UpdatedAt,
+	)
+	
+	if err == sql.ErrNoRows {
+		http.Error(w, "Theme not found", http.StatusNotFound)
+		return
+	} else if err != nil {
+		http.Error(w, "Failed to fetch theme", http.StatusInternalServerError)
+		return
+	}
+	
+	if description.Valid {
+		theme.Description = &description.String
+	}
+	if quarter.Valid {
+		theme.Quarter = &quarter.String
+	}
+	
+	// Get associated epics
+	rows, err := app.db.Query(`
+		SELECT e.id, e.title, e.description, e.status, e.color, e.owner
+		FROM epics e
+		JOIN epic_themes et ON e.id = et.epic_id
+		WHERE et.theme_id = ?
+		ORDER BY e.updated_at DESC
+	`, themeID)
+	
+	if err != nil {
+		http.Error(w, "Failed to fetch theme epics", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	
+	type Epic struct {
+		ID          int64   `json:"id"`
+		Title       string  `json:"title"`
+		Description *string `json:"description"`
+		Status      string  `json:"status"`
+		Color       string  `json:"color"`
+		Owner       *string `json:"owner"`
+	}
+	
+	var epics []Epic
+	for rows.Next() {
+		var epic Epic
+		var epicDesc, epicOwner sql.NullString
+		
+		err := rows.Scan(
+			&epic.ID, &epic.Title, &epicDesc, &epic.Status,
+			&epic.Color, &epicOwner,
+		)
+		if err != nil {
+			continue
+		}
+		
+		if epicDesc.Valid {
+			epic.Description = &epicDesc.String
+		}
+		if epicOwner.Valid {
+			epic.Owner = &epicOwner.String
+		}
+		
+		epics = append(epics, epic)
+	}
+	
+	response := map[string]interface{}{
+		"theme": theme,
+		"epics": epics,
+	}
+	
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+func (app *App) updateTheme(w http.ResponseWriter, r *http.Request, themeID int64) {
+	var input struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Quarter     string `json:"quarter"`
+		Status      string `json:"status"`
+	}
+	
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		http.Error(w, "Invalid input", http.StatusBadRequest)
+		return
+	}
+	
+	_, err := app.db.Exec(`
+		UPDATE themes 
+		SET name = ?, description = ?, quarter = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, input.Name, input.Description, input.Quarter, input.Status, themeID)
+	
+	if err != nil {
+		http.Error(w, "Failed to update theme", http.StatusInternalServerError)
+		return
+	}
+	
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"message": "Theme updated successfully",
+	})
+}
+
+func (app *App) deleteTheme(w http.ResponseWriter, r *http.Request, themeID int64) {
+	_, err := app.db.Exec("DELETE FROM themes WHERE id = ?", themeID)
+	if err != nil {
+		http.Error(w, "Failed to delete theme", http.StatusInternalServerError)
+		return
+	}
+	
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"message": "Theme deleted successfully",
+	})
+}
+
+func (app *App) assignEpicToTheme(w http.ResponseWriter, r *http.Request, themeID int64) {
+	var input struct {
+		EpicID int64 `json:"epic_id"`
+	}
+	
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		http.Error(w, "Invalid input", http.StatusBadRequest)
+		return
+	}
+	
+	_, err := app.db.Exec(`
+		INSERT OR IGNORE INTO epic_themes (epic_id, theme_id) VALUES (?, ?)
+	`, input.EpicID, themeID)
+	
+	if err != nil {
+		http.Error(w, "Failed to assign epic to theme", http.StatusInternalServerError)
+		return
+	}
+	
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"message": "Epic assigned to theme",
+	})
+}
+
+func (app *App) removeEpicFromTheme(w http.ResponseWriter, r *http.Request, themeID int64) {
+	epicIDStr := r.URL.Query().Get("epic_id")
+	if epicIDStr == "" {
+		http.Error(w, "Epic ID required", http.StatusBadRequest)
+		return
+	}
+	
+	epicID, err := strconv.ParseInt(epicIDStr, 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid epic ID", http.StatusBadRequest)
+		return
+	}
+	
+	_, err = app.db.Exec(`
+		DELETE FROM epic_themes WHERE epic_id = ? AND theme_id = ?
+	`, epicID, themeID)
+	
+	if err != nil {
+		http.Error(w, "Failed to remove epic from theme", http.StatusInternalServerError)
+		return
+	}
+	
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"message": "Epic removed from theme",
+	})
+}
+
+// API: Reports
+func (app *App) handleAPIReports(w http.ResponseWriter, r *http.Request) {
+	reportType := r.URL.Query().Get("type")
+	
+	switch reportType {
+	case "summary":
+		app.getReportSummary(w, r)
+	case "burndown":
+		app.getBurndownData(w, r)
+	case "velocity":
+		app.getVelocityData(w, r)
+	default:
+		app.getReportSummary(w, r)
+	}
+}
+
+func (app *App) getReportSummary(w http.ResponseWriter, r *http.Request) {
+	// Get overall statistics
+	type Summary struct {
+		TotalIssues      int     `json:"total_issues"`
+		OpenIssues       int     `json:"open_issues"`
+		ClosedIssues     int     `json:"closed_issues"`
+		TotalEpics       int     `json:"total_epics"`
+		ActiveEpics      int     `json:"active_epics"`
+		CompletedEpics   int     `json:"completed_epics"`
+		TotalThemes      int     `json:"total_themes"`
+		CurrentQuarter   string  `json:"current_quarter"`
+		OverallProgress  float64 `json:"overall_progress"`
+	}
+	
+	var summary Summary
+	
+	// Get issue counts
+	app.db.QueryRow("SELECT COUNT(*) FROM issues").Scan(&summary.TotalIssues)
+	app.db.QueryRow("SELECT COUNT(*) FROM issues WHERE state = 'open'").Scan(&summary.OpenIssues)
+	app.db.QueryRow("SELECT COUNT(*) FROM issues WHERE state = 'closed'").Scan(&summary.ClosedIssues)
+	
+	// Get epic counts
+	app.db.QueryRow("SELECT COUNT(*) FROM epics").Scan(&summary.TotalEpics)
+	app.db.QueryRow("SELECT COUNT(*) FROM epics WHERE status = 'active'").Scan(&summary.ActiveEpics)
+	app.db.QueryRow("SELECT COUNT(*) FROM epics WHERE status = 'completed'").Scan(&summary.CompletedEpics)
+	
+	// Get theme count
+	app.db.QueryRow("SELECT COUNT(*) FROM themes").Scan(&summary.TotalThemes)
+	
+	// Calculate current quarter
+	now := time.Now()
+	quarter := (now.Month()-1)/3 + 1
+	summary.CurrentQuarter = fmt.Sprintf("%d-Q%d", now.Year(), quarter)
+	
+	// Calculate overall progress
+	if summary.TotalIssues > 0 {
+		summary.OverallProgress = float64(summary.ClosedIssues) / float64(summary.TotalIssues) * 100
+	}
+	
+	// Get top epics by progress
+	epicRows, err := app.db.Query(`
+		SELECT 
+			e.id, e.title, e.status,
+			COUNT(DISTINCT ie.issue_id) as total_issues,
+			COUNT(DISTINCT CASE WHEN i.state = 'closed' THEN ie.issue_id END) as closed_issues
+		FROM epics e
+		LEFT JOIN issue_epics ie ON e.id = ie.epic_id
+		LEFT JOIN issues i ON ie.issue_id = i.id
+		WHERE e.status = 'active'
+		GROUP BY e.id
+		HAVING total_issues > 0
+		ORDER BY (closed_issues * 100.0 / total_issues) DESC
+		LIMIT 5
+	`)
+	
+	type EpicProgress struct {
+		ID           int64   `json:"id"`
+		Title        string  `json:"title"`
+		TotalIssues  int     `json:"total_issues"`
+		ClosedIssues int     `json:"closed_issues"`
+		Progress     float64 `json:"progress"`
+	}
+	
+	var topEpics []EpicProgress
+	if err == nil {
+		defer epicRows.Close()
+		for epicRows.Next() {
+			var epic EpicProgress
+			var status string
+			epicRows.Scan(&epic.ID, &epic.Title, &status, &epic.TotalIssues, &epic.ClosedIssues)
+			if epic.TotalIssues > 0 {
+				epic.Progress = float64(epic.ClosedIssues) / float64(epic.TotalIssues) * 100
+			}
+			topEpics = append(topEpics, epic)
+		}
+	}
+	
+	response := map[string]interface{}{
+		"summary":    summary,
+		"top_epics":  topEpics,
+	}
+	
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+func (app *App) getBurndownData(w http.ResponseWriter, r *http.Request) {
+	// Get issues closed over time for the last 30 days
+	thirtyDaysAgo := time.Now().AddDate(0, 0, -30)
+	
+	rows, err := app.db.Query(`
+		SELECT 
+			DATE(closed_at) as close_date,
+			COUNT(*) as issues_closed
+		FROM issues
+		WHERE closed_at IS NOT NULL 
+		AND closed_at >= ?
+		GROUP BY DATE(closed_at)
+		ORDER BY close_date
+	`, thirtyDaysAgo)
+	
+	if err != nil {
+		http.Error(w, "Failed to fetch burndown data", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	
+	type DailyCount struct {
+		Date   string `json:"date"`
+		Closed int    `json:"closed"`
+	}
+	
+	var data []DailyCount
+	for rows.Next() {
+		var count DailyCount
+		rows.Scan(&count.Date, &count.Closed)
+		data = append(data, count)
+	}
+	
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(data)
+}
+
+func (app *App) getVelocityData(w http.ResponseWriter, r *http.Request) {
+	// Get weekly velocity for the last 12 weeks
+	twelveWeeksAgo := time.Now().AddDate(0, 0, -84)
+	
+	rows, err := app.db.Query(`
+		SELECT 
+			strftime('%Y-%W', closed_at) as week,
+			COUNT(*) as issues_closed
+		FROM issues
+		WHERE closed_at IS NOT NULL 
+		AND closed_at >= ?
+		GROUP BY strftime('%Y-%W', closed_at)
+		ORDER BY week
+	`, twelveWeeksAgo)
+	
+	if err != nil {
+		http.Error(w, "Failed to fetch velocity data", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	
+	type WeeklyVelocity struct {
+		Week   string `json:"week"`
+		Closed int    `json:"closed"`
+	}
+	
+	var data []WeeklyVelocity
+	for rows.Next() {
+		var velocity WeeklyVelocity
+		rows.Scan(&velocity.Week, &velocity.Closed)
+		data = append(data, velocity)
+	}
+	
+	// Calculate average velocity
+	var totalClosed int
+	for _, v := range data {
+		totalClosed += v.Closed
+	}
+	
+	avgVelocity := 0.0
+	if len(data) > 0 {
+		avgVelocity = float64(totalClosed) / float64(len(data))
+	}
+	
+	response := map[string]interface{}{
+		"weekly_data": data,
+		"average_velocity": avgVelocity,
+	}
+	
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
 func runMigrations(db *sql.DB) {
 	schema := `
 	CREATE TABLE IF NOT EXISTS users (
@@ -2013,6 +2963,52 @@ func runMigrations(db *sql.DB) {
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_csrf_expires ON csrf_tokens(expires_at);
+
+	-- Epic and Theme tables for product features
+	CREATE TABLE IF NOT EXISTS epics (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		title TEXT NOT NULL,
+		description TEXT,
+		status TEXT DEFAULT 'active' CHECK (status IN ('active', 'completed', 'archived')),
+		color TEXT DEFAULT '#3B82F6',
+		owner TEXT,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE TABLE IF NOT EXISTS issue_epics (
+		issue_id INTEGER NOT NULL,
+		epic_id INTEGER NOT NULL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (issue_id, epic_id),
+		FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE,
+		FOREIGN KEY (epic_id) REFERENCES epics(id) ON DELETE CASCADE
+	);
+
+	CREATE TABLE IF NOT EXISTS themes (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		name TEXT NOT NULL,
+		description TEXT,
+		quarter TEXT,
+		status TEXT DEFAULT 'planned' CHECK (status IN ('planned', 'in_progress', 'completed', 'cancelled')),
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE TABLE IF NOT EXISTS epic_themes (
+		epic_id INTEGER NOT NULL,
+		theme_id INTEGER NOT NULL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (epic_id, theme_id),
+		FOREIGN KEY (epic_id) REFERENCES epics(id) ON DELETE CASCADE,
+		FOREIGN KEY (theme_id) REFERENCES themes(id) ON DELETE CASCADE
+	);
+
+	-- Indexes for performance
+	CREATE INDEX IF NOT EXISTS idx_epics_status ON epics(status);
+	CREATE INDEX IF NOT EXISTS idx_epics_owner ON epics(owner);
+	CREATE INDEX IF NOT EXISTS idx_themes_quarter ON themes(quarter);
+	CREATE INDEX IF NOT EXISTS idx_themes_status ON themes(status);
 	`
 
 	if _, err := db.Exec(schema); err != nil {

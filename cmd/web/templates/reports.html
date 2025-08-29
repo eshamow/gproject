@@ -1,0 +1,346 @@
+{{template "base.html" .}}
+
+{{define "title"}}Reports - GitHub Issues PM{{end}}
+
+{{define "content"}}
+<!-- Navigation tabs -->
+<div class="border-b border-gray-200 mb-6">
+    <nav class="-mb-px flex space-x-8">
+        <a href="/dashboard" class="border-b-2 border-transparent py-2 px-1 text-sm font-medium text-gray-500 hover:text-gray-700 hover:border-gray-300">
+            Dashboard
+        </a>
+        <a href="/issues" class="border-b-2 border-transparent py-2 px-1 text-sm font-medium text-gray-500 hover:text-gray-700 hover:border-gray-300">
+            Issues
+        </a>
+        <a href="/epics" class="border-b-2 border-transparent py-2 px-1 text-sm font-medium text-gray-500 hover:text-gray-700 hover:border-gray-300">
+            Epics
+        </a>
+        <a href="/themes" class="border-b-2 border-transparent py-2 px-1 text-sm font-medium text-gray-500 hover:text-gray-700 hover:border-gray-300">
+            Themes
+        </a>
+        <a href="/reports" class="border-b-2 border-orange-500 py-2 px-1 text-sm font-medium text-orange-600">
+            Reports
+        </a>
+    </nav>
+</div>
+
+<div class="container mx-auto p-6">
+    <h1 class="text-3xl font-bold mb-6">Reports & Analytics</h1>
+
+    <!-- Summary Cards -->
+    <div id="summary-cards" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+        <!-- Summary cards will be loaded here -->
+    </div>
+
+    <!-- Progress Section -->
+    <div class="bg-white rounded-lg shadow p-6 mb-8">
+        <h2 class="text-xl font-semibold mb-4">Top Active Epics Progress</h2>
+        <div id="epics-progress" class="space-y-4">
+            <!-- Epic progress bars will be loaded here -->
+        </div>
+    </div>
+
+    <!-- Charts Section -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <!-- Burndown Chart -->
+        <div class="bg-white rounded-lg shadow p-6">
+            <h2 class="text-xl font-semibold mb-4">30-Day Burndown</h2>
+            <div id="burndown-chart" class="h-64 flex items-center justify-center">
+                <canvas id="burndown-canvas" width="400" height="250"></canvas>
+            </div>
+        </div>
+
+        <!-- Velocity Chart -->
+        <div class="bg-white rounded-lg shadow p-6">
+            <h2 class="text-xl font-semibold mb-4">Weekly Velocity</h2>
+            <div id="velocity-chart" class="h-64 flex items-center justify-center">
+                <canvas id="velocity-canvas" width="400" height="250"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <!-- Detailed Stats -->
+    <div class="bg-white rounded-lg shadow p-6 mt-8">
+        <h2 class="text-xl font-semibold mb-4">Detailed Statistics</h2>
+        <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+                <thead class="border-b">
+                    <tr>
+                        <th class="text-left py-2">Metric</th>
+                        <th class="text-right py-2">Value</th>
+                        <th class="text-right py-2">Change (7d)</th>
+                    </tr>
+                </thead>
+                <tbody id="stats-table">
+                    <!-- Stats rows will be loaded here -->
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.js"></script>
+<script>
+let burndownChart = null;
+let velocityChart = null;
+
+// Load reports on page load
+document.addEventListener('DOMContentLoaded', loadReports);
+
+async function loadReports() {
+    try {
+        // Load summary
+        const summaryResponse = await fetch('/api/reports?type=summary');
+        const summaryData = await summaryResponse.json();
+        displaySummary(summaryData);
+
+        // Load burndown data
+        const burndownResponse = await fetch('/api/reports?type=burndown');
+        const burndownData = await burndownResponse.json();
+        displayBurndownChart(burndownData);
+
+        // Load velocity data
+        const velocityResponse = await fetch('/api/reports?type=velocity');
+        const velocityData = await velocityResponse.json();
+        displayVelocityChart(velocityData);
+
+    } catch (error) {
+        console.error('Failed to load reports:', error);
+    }
+}
+
+function displaySummary(data) {
+    const { summary, top_epics } = data;
+    
+    // Display summary cards
+    document.getElementById('summary-cards').innerHTML = `
+        <div class="bg-gradient-to-r from-blue-500 to-blue-600 text-white rounded-lg p-6">
+            <div class="text-3xl font-bold">${summary.total_issues}</div>
+            <div class="text-sm opacity-90 mt-2">Total Issues</div>
+            <div class="mt-4 text-xs">
+                <span class="font-medium">${summary.open_issues}</span> open • 
+                <span class="font-medium">${summary.closed_issues}</span> closed
+            </div>
+        </div>
+        
+        <div class="bg-gradient-to-r from-purple-500 to-purple-600 text-white rounded-lg p-6">
+            <div class="text-3xl font-bold">${summary.total_epics}</div>
+            <div class="text-sm opacity-90 mt-2">Total Epics</div>
+            <div class="mt-4 text-xs">
+                <span class="font-medium">${summary.active_epics}</span> active • 
+                <span class="font-medium">${summary.completed_epics}</span> completed
+            </div>
+        </div>
+        
+        <div class="bg-gradient-to-r from-green-500 to-green-600 text-white rounded-lg p-6">
+            <div class="text-3xl font-bold">${Math.round(summary.overall_progress)}%</div>
+            <div class="text-sm opacity-90 mt-2">Overall Progress</div>
+            <div class="mt-4">
+                <div class="w-full bg-white bg-opacity-30 rounded-full h-2">
+                    <div class="bg-white h-2 rounded-full" style="width: ${summary.overall_progress}%"></div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="bg-gradient-to-r from-orange-500 to-orange-600 text-white rounded-lg p-6">
+            <div class="text-3xl font-bold">${summary.total_themes}</div>
+            <div class="text-sm opacity-90 mt-2">Themes</div>
+            <div class="mt-4 text-xs">
+                Quarter: <span class="font-medium">${summary.current_quarter}</span>
+            </div>
+        </div>
+    `;
+    
+    // Display top epics progress
+    if (top_epics && top_epics.length > 0) {
+        document.getElementById('epics-progress').innerHTML = top_epics.map(epic => `
+            <div class="flex items-center justify-between">
+                <div class="flex-1">
+                    <div class="flex justify-between mb-1">
+                        <span class="text-sm font-medium">${epic.title}</span>
+                        <span class="text-sm text-gray-500">${Math.round(epic.progress)}%</span>
+                    </div>
+                    <div class="w-full bg-gray-200 rounded-full h-2">
+                        <div class="bg-blue-600 h-2 rounded-full transition-all duration-500" 
+                             style="width: ${epic.progress}%"></div>
+                    </div>
+                    <div class="text-xs text-gray-500 mt-1">
+                        ${epic.closed_issues} / ${epic.total_issues} issues completed
+                    </div>
+                </div>
+            </div>
+        `).join('');
+    } else {
+        document.getElementById('epics-progress').innerHTML = '<p class="text-gray-500">No active epics with issues</p>';
+    }
+    
+    // Display detailed stats table
+    document.getElementById('stats-table').innerHTML = `
+        <tr class="border-b">
+            <td class="py-2">Total Issues</td>
+            <td class="text-right font-medium">${summary.total_issues}</td>
+            <td class="text-right text-gray-500">-</td>
+        </tr>
+        <tr class="border-b">
+            <td class="py-2">Open Issues</td>
+            <td class="text-right font-medium">${summary.open_issues}</td>
+            <td class="text-right text-gray-500">-</td>
+        </tr>
+        <tr class="border-b">
+            <td class="py-2">Closed Issues</td>
+            <td class="text-right font-medium">${summary.closed_issues}</td>
+            <td class="text-right text-gray-500">-</td>
+        </tr>
+        <tr class="border-b">
+            <td class="py-2">Active Epics</td>
+            <td class="text-right font-medium">${summary.active_epics}</td>
+            <td class="text-right text-gray-500">-</td>
+        </tr>
+        <tr class="border-b">
+            <td class="py-2">Completed Epics</td>
+            <td class="text-right font-medium">${summary.completed_epics}</td>
+            <td class="text-right text-gray-500">-</td>
+        </tr>
+        <tr class="border-b">
+            <td class="py-2">Total Themes</td>
+            <td class="text-right font-medium">${summary.total_themes}</td>
+            <td class="text-right text-gray-500">-</td>
+        </tr>
+        <tr>
+            <td class="py-2">Completion Rate</td>
+            <td class="text-right font-medium">${Math.round(summary.overall_progress)}%</td>
+            <td class="text-right text-gray-500">-</td>
+        </tr>
+    `;
+}
+
+function displayBurndownChart(data) {
+    const ctx = document.getElementById('burndown-canvas').getContext('2d');
+    
+    if (burndownChart) {
+        burndownChart.destroy();
+    }
+    
+    // Prepare data for chart
+    const labels = data.map(d => {
+        const date = new Date(d.date);
+        return `${date.getMonth()+1}/${date.getDate()}`;
+    });
+    const values = data.map(d => d.closed);
+    
+    // Calculate cumulative closed
+    let cumulative = 0;
+    const cumulativeValues = values.map(v => {
+        cumulative += v;
+        return cumulative;
+    });
+    
+    burndownChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: labels,
+            datasets: [{
+                label: 'Issues Closed (Cumulative)',
+                data: cumulativeValues,
+                borderColor: 'rgb(59, 130, 246)',
+                backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                tension: 0.1,
+                fill: true
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {
+                    display: false
+                }
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    ticks: {
+                        precision: 0
+                    }
+                }
+            }
+        }
+    });
+}
+
+function displayVelocityChart(data) {
+    const ctx = document.getElementById('velocity-canvas').getContext('2d');
+    
+    if (velocityChart) {
+        velocityChart.destroy();
+    }
+    
+    const { weekly_data, average_velocity } = data;
+    
+    // Prepare data for chart
+    const labels = weekly_data.map(d => `Week ${d.week.split('-')[1]}`);
+    const values = weekly_data.map(d => d.closed);
+    
+    velocityChart = new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: labels,
+            datasets: [{
+                label: 'Issues Closed',
+                data: values,
+                backgroundColor: 'rgba(147, 51, 234, 0.8)',
+                borderColor: 'rgb(147, 51, 234)',
+                borderWidth: 1
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {
+                    display: false
+                },
+                annotation: {
+                    annotations: {
+                        line1: {
+                            type: 'line',
+                            yMin: average_velocity,
+                            yMax: average_velocity,
+                            borderColor: 'rgb(239, 68, 68)',
+                            borderWidth: 2,
+                            borderDash: [5, 5],
+                            label: {
+                                content: `Avg: ${Math.round(average_velocity)}`,
+                                enabled: true,
+                                position: 'end'
+                            }
+                        }
+                    }
+                }
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    ticks: {
+                        precision: 0
+                    }
+                }
+            }
+        }
+    });
+    
+    // Add average line manually if annotation plugin not available
+    if (!velocityChart.options.plugins.annotation) {
+        // Display average below chart
+        document.getElementById('velocity-chart').insertAdjacentHTML('afterend', 
+            `<div class="text-center text-sm text-gray-500 mt-2">
+                Average velocity: ${Math.round(average_velocity)} issues/week
+            </div>`
+        );
+    }
+}
+
+// Auto-refresh every 5 minutes
+setInterval(loadReports, 5 * 60 * 1000);
+</script>
+{{end}}

@@ -1,0 +1,419 @@
+{{template "base.html" .}}
+
+{{define "title"}}Themes - GitHub Issues PM{{end}}
+
+{{define "content"}}
+<!-- Navigation tabs -->
+<div class="border-b border-gray-200 mb-6">
+    <nav class="-mb-px flex space-x-8">
+        <a href="/dashboard" class="border-b-2 border-transparent py-2 px-1 text-sm font-medium text-gray-500 hover:text-gray-700 hover:border-gray-300">
+            Dashboard
+        </a>
+        <a href="/issues" class="border-b-2 border-transparent py-2 px-1 text-sm font-medium text-gray-500 hover:text-gray-700 hover:border-gray-300">
+            Issues
+        </a>
+        <a href="/epics" class="border-b-2 border-transparent py-2 px-1 text-sm font-medium text-gray-500 hover:text-gray-700 hover:border-gray-300">
+            Epics
+        </a>
+        <a href="/themes" class="border-b-2 border-purple-500 py-2 px-1 text-sm font-medium text-purple-600">
+            Themes
+        </a>
+        <a href="/reports" class="border-b-2 border-transparent py-2 px-1 text-sm font-medium text-gray-500 hover:text-gray-700 hover:border-gray-300">
+            Reports
+        </a>
+    </nav>
+</div>
+
+<div class="container mx-auto p-6">
+    <!-- Header with Create Button -->
+    <div class="flex justify-between items-center mb-6">
+        <h1 class="text-3xl font-bold">Themes & Roadmap</h1>
+        <button onclick="openCreateThemeModal()" 
+                class="bg-purple-600 text-white px-4 py-2 rounded hover:bg-purple-700 transition">
+            Create Theme
+        </button>
+    </div>
+
+    <!-- Quarter Filter -->
+    <div class="mb-6">
+        <label class="text-sm font-medium text-gray-700 mr-2">Filter by Quarter:</label>
+        <select id="quarter-filter" onchange="loadThemes()" 
+                class="px-3 py-2 border rounded focus:outline-none focus:ring-2 focus:ring-purple-500">
+            <option value="">All Quarters</option>
+            <option value="2024-Q4">2024 Q4</option>
+            <option value="2025-Q1">2025 Q1</option>
+            <option value="2025-Q2">2025 Q2</option>
+            <option value="2025-Q3">2025 Q3</option>
+            <option value="2025-Q4">2025 Q4</option>
+        </select>
+    </div>
+
+    <!-- Themes List -->
+    <div id="themes-list" class="space-y-6">
+        <!-- Themes will be loaded here -->
+    </div>
+</div>
+
+<!-- Create/Edit Theme Modal -->
+<div id="theme-modal" class="hidden fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center">
+    <div class="bg-white rounded-lg p-6 max-w-md w-full m-4">
+        <h2 id="modal-title" class="text-xl font-bold mb-4">Create Theme</h2>
+        <form id="theme-form" onsubmit="saveTheme(event)">
+            <input type="hidden" id="theme-id" value="">
+            
+            <div class="mb-4">
+                <label class="block text-sm font-medium mb-2">Name *</label>
+                <input type="text" id="theme-name" required
+                       class="w-full px-3 py-2 border rounded focus:outline-none focus:ring-2 focus:ring-purple-500">
+            </div>
+            
+            <div class="mb-4">
+                <label class="block text-sm font-medium mb-2">Description</label>
+                <textarea id="theme-description" rows="3"
+                          class="w-full px-3 py-2 border rounded focus:outline-none focus:ring-2 focus:ring-purple-500"></textarea>
+            </div>
+            
+            <div class="mb-4">
+                <label class="block text-sm font-medium mb-2">Quarter</label>
+                <select id="theme-quarter"
+                        class="w-full px-3 py-2 border rounded focus:outline-none focus:ring-2 focus:ring-purple-500">
+                    <option value="">No specific quarter</option>
+                    <option value="2024-Q4">2024 Q4</option>
+                    <option value="2025-Q1">2025 Q1</option>
+                    <option value="2025-Q2">2025 Q2</option>
+                    <option value="2025-Q3">2025 Q3</option>
+                    <option value="2025-Q4">2025 Q4</option>
+                </select>
+            </div>
+            
+            <div class="mb-4">
+                <label class="block text-sm font-medium mb-2">Status</label>
+                <select id="theme-status" 
+                        class="w-full px-3 py-2 border rounded focus:outline-none focus:ring-2 focus:ring-purple-500">
+                    <option value="planned">Planned</option>
+                    <option value="in_progress">In Progress</option>
+                    <option value="completed">Completed</option>
+                    <option value="cancelled">Cancelled</option>
+                </select>
+            </div>
+            
+            <div class="flex justify-end gap-2">
+                <button type="button" onclick="closeThemeModal()"
+                        class="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded transition">
+                    Cancel
+                </button>
+                <button type="submit"
+                        class="px-4 py-2 bg-purple-600 text-white rounded hover:bg-purple-700 transition">
+                    Save Theme
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Theme Details Modal -->
+<div id="theme-details-modal" class="hidden fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center">
+    <div class="bg-white rounded-lg p-6 max-w-4xl w-full m-4 max-h-[90vh] overflow-y-auto">
+        <div class="flex justify-between items-start mb-4">
+            <h2 id="details-title" class="text-2xl font-bold">Theme Details</h2>
+            <button onclick="closeDetailsModal()" class="text-gray-500 hover:text-gray-700">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                </svg>
+            </button>
+        </div>
+        
+        <div id="theme-details-content">
+            <!-- Theme details will be loaded here -->
+        </div>
+        
+        <!-- Epics Section -->
+        <div class="mt-6">
+            <h3 class="text-lg font-semibold mb-3">Associated Epics</h3>
+            <div id="theme-epics-list" class="space-y-3">
+                <!-- Epics will be loaded here -->
+            </div>
+        </div>
+        
+        <!-- Add Epic Section -->
+        <div class="mt-4 p-4 bg-gray-50 rounded">
+            <h4 class="font-medium mb-2">Add Epic to Theme</h4>
+            <select id="epic-select" class="w-full px-3 py-2 border rounded focus:outline-none focus:ring-2 focus:ring-purple-500">
+                <option value="">Select an epic...</option>
+            </select>
+            <button onclick="addEpicToTheme()" class="mt-2 px-4 py-2 bg-purple-600 text-white rounded hover:bg-purple-700 transition">
+                Add Epic
+            </button>
+        </div>
+    </div>
+</div>
+
+<script>
+let currentThemeId = null;
+let allEpics = [];
+
+// Load themes on page load
+document.addEventListener('DOMContentLoaded', () => {
+    loadThemes();
+    loadEpicsForSelect();
+});
+
+async function loadThemes() {
+    try {
+        const quarterFilter = document.getElementById('quarter-filter').value;
+        const response = await fetch('/api/themes');
+        let themes = await response.json();
+        
+        // Filter by quarter if selected
+        if (quarterFilter) {
+            themes = themes.filter(theme => theme.quarter === quarterFilter);
+        }
+        
+        // Group themes by quarter
+        const themesByQuarter = {};
+        themes.forEach(theme => {
+            const quarter = theme.quarter || 'Unplanned';
+            if (!themesByQuarter[quarter]) {
+                themesByQuarter[quarter] = [];
+            }
+            themesByQuarter[quarter].push(theme);
+        });
+        
+        // Sort quarters
+        const quarters = Object.keys(themesByQuarter).sort((a, b) => {
+            if (a === 'Unplanned') return 1;
+            if (b === 'Unplanned') return -1;
+            return b.localeCompare(a);
+        });
+        
+        const themesList = document.getElementById('themes-list');
+        themesList.innerHTML = quarters.map(quarter => `
+            <div class="bg-white rounded-lg shadow p-6">
+                <h2 class="text-xl font-bold mb-4 text-purple-700">${quarter}</h2>
+                <div class="space-y-4">
+                    ${themesByQuarter[quarter].map(theme => `
+                        <div class="border-l-4 border-purple-500 pl-4">
+                            <div class="flex justify-between items-start">
+                                <div class="flex-1">
+                                    <h3 class="text-lg font-semibold">${theme.name}</h3>
+                                    ${theme.description ? `<p class="text-gray-600 mt-1">${theme.description}</p>` : ''}
+                                    <div class="flex items-center gap-4 mt-2">
+                                        <span class="px-2 py-1 text-xs rounded ${
+                                            theme.status === 'planned' ? 'bg-gray-100 text-gray-800' :
+                                            theme.status === 'in_progress' ? 'bg-yellow-100 text-yellow-800' :
+                                            theme.status === 'completed' ? 'bg-green-100 text-green-800' :
+                                            'bg-red-100 text-red-800'
+                                        }">
+                                            ${theme.status.replace('_', ' ')}
+                                        </span>
+                                        <span class="text-sm text-gray-500">
+                                            ${theme.epic_count} epics
+                                        </span>
+                                    </div>
+                                </div>
+                                <div class="flex gap-2 ml-4">
+                                    <button onclick="viewThemeDetails(${theme.id})" 
+                                            class="px-3 py-1 text-sm bg-gray-100 hover:bg-gray-200 rounded transition">
+                                        View
+                                    </button>
+                                    <button onclick="editTheme(${theme.id}, '${theme.name}', '${theme.description || ''}', '${theme.quarter || ''}', '${theme.status}')" 
+                                            class="px-3 py-1 text-sm bg-purple-100 hover:bg-purple-200 text-purple-700 rounded transition">
+                                        Edit
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    `).join('')}
+                </div>
+            </div>
+        `).join('');
+    } catch (error) {
+        console.error('Failed to load themes:', error);
+    }
+}
+
+async function loadEpicsForSelect() {
+    try {
+        const response = await fetch('/api/epics');
+        allEpics = await response.json();
+    } catch (error) {
+        console.error('Failed to load epics:', error);
+    }
+}
+
+function openCreateThemeModal() {
+    document.getElementById('modal-title').textContent = 'Create Theme';
+    document.getElementById('theme-id').value = '';
+    document.getElementById('theme-form').reset();
+    document.getElementById('theme-modal').classList.remove('hidden');
+}
+
+function editTheme(id, name, description, quarter, status) {
+    document.getElementById('modal-title').textContent = 'Edit Theme';
+    document.getElementById('theme-id').value = id;
+    document.getElementById('theme-name').value = name;
+    document.getElementById('theme-description').value = description;
+    document.getElementById('theme-quarter').value = quarter;
+    document.getElementById('theme-status').value = status;
+    document.getElementById('theme-modal').classList.remove('hidden');
+}
+
+function closeThemeModal() {
+    document.getElementById('theme-modal').classList.add('hidden');
+}
+
+async function saveTheme(event) {
+    event.preventDefault();
+    
+    const themeId = document.getElementById('theme-id').value;
+    const data = {
+        name: document.getElementById('theme-name').value,
+        description: document.getElementById('theme-description').value,
+        quarter: document.getElementById('theme-quarter').value,
+        status: document.getElementById('theme-status').value
+    };
+    
+    try {
+        const url = themeId ? `/api/themes/${themeId}` : '/api/themes';
+        const method = themeId ? 'PUT' : 'POST';
+        
+        const response = await fetch(url, {
+            method: method,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        
+        if (response.ok) {
+            closeThemeModal();
+            loadThemes();
+        } else {
+            alert('Failed to save theme');
+        }
+    } catch (error) {
+        console.error('Error saving theme:', error);
+        alert('Failed to save theme');
+    }
+}
+
+async function viewThemeDetails(themeId) {
+    currentThemeId = themeId;
+    try {
+        const response = await fetch(`/api/themes/${themeId}`);
+        const data = await response.json();
+        
+        document.getElementById('details-title').textContent = data.theme.name;
+        
+        // Display theme details
+        document.getElementById('theme-details-content').innerHTML = `
+            <div class="grid grid-cols-2 gap-4 mb-4">
+                <div>
+                    <span class="font-medium">Status:</span> 
+                    <span class="ml-2 px-2 py-1 text-xs rounded ${
+                        data.theme.status === 'planned' ? 'bg-gray-100 text-gray-800' :
+                        data.theme.status === 'in_progress' ? 'bg-yellow-100 text-yellow-800' :
+                        data.theme.status === 'completed' ? 'bg-green-100 text-green-800' :
+                        'bg-red-100 text-red-800'
+                    }">${data.theme.status.replace('_', ' ')}</span>
+                </div>
+                <div>
+                    <span class="font-medium">Quarter:</span> ${data.theme.quarter || 'Not specified'}
+                </div>
+                <div>
+                    <span class="font-medium">Created:</span> ${new Date(data.theme.created_at).toLocaleDateString()}
+                </div>
+                <div>
+                    <span class="font-medium">Updated:</span> ${new Date(data.theme.updated_at).toLocaleDateString()}
+                </div>
+            </div>
+            ${data.theme.description ? `
+                <div>
+                    <span class="font-medium">Description:</span>
+                    <p class="mt-1 text-gray-600">${data.theme.description}</p>
+                </div>
+            ` : ''}
+        `;
+        
+        // Display associated epics
+        if (data.epics && data.epics.length > 0) {
+            document.getElementById('theme-epics-list').innerHTML = data.epics.map(epic => `
+                <div class="flex justify-between items-center p-4 bg-gray-50 rounded">
+                    <div class="flex items-center">
+                        <div class="w-2 h-8 rounded mr-3" style="background-color: ${epic.color}"></div>
+                        <div>
+                            <div class="font-medium">${epic.title}</div>
+                            <div class="text-sm text-gray-500">
+                                ${epic.status} • ${epic.owner ? `Owner: ${epic.owner}` : 'No owner'}
+                            </div>
+                        </div>
+                    </div>
+                    <button onclick="removeEpicFromTheme(${epic.id})" 
+                            class="text-red-600 hover:text-red-800">
+                        Remove
+                    </button>
+                </div>
+            `).join('');
+        } else {
+            document.getElementById('theme-epics-list').innerHTML = '<p class="text-gray-500">No epics associated with this theme</p>';
+        }
+        
+        // Populate epic select dropdown
+        const epicSelect = document.getElementById('epic-select');
+        const themeEpicIds = data.epics ? data.epics.map(e => e.id) : [];
+        const availableEpics = allEpics.filter(e => !themeEpicIds.includes(e.id));
+        
+        epicSelect.innerHTML = '<option value="">Select an epic...</option>' +
+            availableEpics.map(epic => `
+                <option value="${epic.id}">${epic.title}</option>
+            `).join('');
+        
+        document.getElementById('theme-details-modal').classList.remove('hidden');
+    } catch (error) {
+        console.error('Failed to load theme details:', error);
+    }
+}
+
+function closeDetailsModal() {
+    document.getElementById('theme-details-modal').classList.add('hidden');
+    currentThemeId = null;
+}
+
+async function addEpicToTheme() {
+    const epicId = document.getElementById('epic-select').value;
+    if (!epicId || !currentThemeId) return;
+    
+    try {
+        const response = await fetch(`/api/themes/${currentThemeId}/epics`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ epic_id: parseInt(epicId) })
+        });
+        
+        if (response.ok) {
+            viewThemeDetails(currentThemeId); // Refresh the details
+            loadThemes(); // Update the main list
+        }
+    } catch (error) {
+        console.error('Failed to add epic to theme:', error);
+    }
+}
+
+async function removeEpicFromTheme(epicId) {
+    if (!currentThemeId) return;
+    
+    if (confirm('Remove this epic from the theme?')) {
+        try {
+            const response = await fetch(`/api/themes/${currentThemeId}/epics?epic_id=${epicId}`, {
+                method: 'DELETE'
+            });
+            
+            if (response.ok) {
+                viewThemeDetails(currentThemeId); // Refresh the details
+                loadThemes(); // Update the main list
+            }
+        } catch (error) {
+            console.error('Failed to remove epic from theme:', error);
+        }
+    }
+}
+</script>
+{{end}}

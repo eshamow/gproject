@@ -1,0 +1,395 @@
+{{template "base.html" .}}
+
+{{define "title"}}Epics - GitHub Issues PM{{end}}
+
+{{define "content"}}
+<!-- Navigation tabs -->
+<div class="border-b border-gray-200 mb-6">
+    <nav class="-mb-px flex space-x-8">
+        <a href="/dashboard" class="border-b-2 border-transparent py-2 px-1 text-sm font-medium text-gray-500 hover:text-gray-700 hover:border-gray-300">
+            Dashboard
+        </a>
+        <a href="/issues" class="border-b-2 border-transparent py-2 px-1 text-sm font-medium text-gray-500 hover:text-gray-700 hover:border-gray-300">
+            Issues
+        </a>
+        <a href="/epics" class="border-b-2 border-blue-500 py-2 px-1 text-sm font-medium text-blue-600">
+            Epics
+        </a>
+        <a href="/themes" class="border-b-2 border-transparent py-2 px-1 text-sm font-medium text-gray-500 hover:text-gray-700 hover:border-gray-300">
+            Themes
+        </a>
+        <a href="/reports" class="border-b-2 border-transparent py-2 px-1 text-sm font-medium text-gray-500 hover:text-gray-700 hover:border-gray-300">
+            Reports
+        </a>
+    </nav>
+</div>
+
+<div class="container mx-auto p-6">
+    <!-- Header with Create Button -->
+    <div class="flex justify-between items-center mb-6">
+        <h1 class="text-3xl font-bold">Epics</h1>
+        <button onclick="openCreateEpicModal()" 
+                class="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 transition">
+            Create Epic
+        </button>
+    </div>
+
+    <!-- Epics Grid -->
+    <div id="epics-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        <!-- Epics will be loaded here -->
+    </div>
+</div>
+
+<!-- Create/Edit Epic Modal -->
+<div id="epic-modal" class="hidden fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center">
+    <div class="bg-white rounded-lg p-6 max-w-md w-full m-4">
+        <h2 id="modal-title" class="text-xl font-bold mb-4">Create Epic</h2>
+        <form id="epic-form" onsubmit="saveEpic(event)">
+            <input type="hidden" id="epic-id" value="">
+            
+            <div class="mb-4">
+                <label class="block text-sm font-medium mb-2">Title *</label>
+                <input type="text" id="epic-title" required
+                       class="w-full px-3 py-2 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500">
+            </div>
+            
+            <div class="mb-4">
+                <label class="block text-sm font-medium mb-2">Description</label>
+                <textarea id="epic-description" rows="3"
+                          class="w-full px-3 py-2 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"></textarea>
+            </div>
+            
+            <div class="mb-4">
+                <label class="block text-sm font-medium mb-2">Owner</label>
+                <input type="text" id="epic-owner"
+                       class="w-full px-3 py-2 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500">
+            </div>
+            
+            <div class="mb-4">
+                <label class="block text-sm font-medium mb-2">Color</label>
+                <input type="color" id="epic-color" value="#3B82F6"
+                       class="w-full h-10 rounded cursor-pointer">
+            </div>
+            
+            <div class="mb-4">
+                <label class="block text-sm font-medium mb-2">Status</label>
+                <select id="epic-status" 
+                        class="w-full px-3 py-2 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <option value="active">Active</option>
+                    <option value="completed">Completed</option>
+                    <option value="archived">Archived</option>
+                </select>
+            </div>
+            
+            <div class="flex justify-end gap-2">
+                <button type="button" onclick="closeEpicModal()"
+                        class="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded transition">
+                    Cancel
+                </button>
+                <button type="submit"
+                        class="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition">
+                    Save Epic
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Epic Details Modal -->
+<div id="epic-details-modal" class="hidden fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center">
+    <div class="bg-white rounded-lg p-6 max-w-4xl w-full m-4 max-h-[90vh] overflow-y-auto">
+        <div class="flex justify-between items-start mb-4">
+            <h2 id="details-title" class="text-2xl font-bold">Epic Details</h2>
+            <button onclick="closeDetailsModal()" class="text-gray-500 hover:text-gray-700">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                </svg>
+            </button>
+        </div>
+        
+        <div id="epic-details-content">
+            <!-- Epic details will be loaded here -->
+        </div>
+        
+        <!-- Issues Section -->
+        <div class="mt-6">
+            <h3 class="text-lg font-semibold mb-3">Linked Issues</h3>
+            <div id="epic-issues-list" class="space-y-2">
+                <!-- Issues will be loaded here -->
+            </div>
+        </div>
+        
+        <!-- Add Issue Section -->
+        <div class="mt-4 p-4 bg-gray-50 rounded">
+            <h4 class="font-medium mb-2">Add Issue to Epic</h4>
+            <div class="flex gap-2">
+                <input type="text" id="issue-search" placeholder="Search issues by title or #number"
+                       class="flex-1 px-3 py-2 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <button onclick="searchIssuesForEpic()" 
+                        class="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition">
+                    Search
+                </button>
+            </div>
+            <div id="issue-search-results" class="mt-2">
+                <!-- Search results will appear here -->
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+let currentEpicId = null;
+
+// Load epics on page load
+document.addEventListener('DOMContentLoaded', loadEpics);
+
+async function loadEpics() {
+    try {
+        const response = await fetch('/api/epics');
+        const epics = await response.json();
+        
+        const grid = document.getElementById('epics-grid');
+        grid.innerHTML = epics.map(epic => `
+            <div class="bg-white rounded-lg shadow p-6 border-l-4" style="border-color: ${epic.color}">
+                <div class="flex justify-between items-start mb-3">
+                    <h3 class="text-lg font-semibold">${epic.title}</h3>
+                    <span class="px-2 py-1 text-xs rounded ${
+                        epic.status === 'active' ? 'bg-green-100 text-green-800' :
+                        epic.status === 'completed' ? 'bg-blue-100 text-blue-800' :
+                        'bg-gray-100 text-gray-800'
+                    }">
+                        ${epic.status}
+                    </span>
+                </div>
+                
+                ${epic.description ? `<p class="text-gray-600 mb-3 text-sm">${epic.description}</p>` : ''}
+                
+                <div class="flex justify-between items-center mb-3">
+                    <div class="text-sm text-gray-500">
+                        ${epic.owner ? `Owner: ${epic.owner}` : 'No owner'}
+                    </div>
+                    <div class="text-sm">
+                        ${epic.issue_count} issues
+                    </div>
+                </div>
+                
+                <!-- Progress Bar -->
+                <div class="w-full bg-gray-200 rounded-full h-2 mb-3">
+                    <div class="bg-blue-600 h-2 rounded-full" style="width: ${epic.progress}%"></div>
+                </div>
+                <div class="text-sm text-gray-600 mb-3">
+                    ${epic.closed_issue_count} / ${epic.issue_count} completed
+                </div>
+                
+                <div class="flex gap-2">
+                    <button onclick="viewEpicDetails(${epic.id})" 
+                            class="flex-1 px-3 py-1 text-sm bg-gray-100 hover:bg-gray-200 rounded transition">
+                        View Details
+                    </button>
+                    <button onclick="editEpic(${epic.id}, '${epic.title}', '${epic.description || ''}', '${epic.owner || ''}', '${epic.color}', '${epic.status}')" 
+                            class="flex-1 px-3 py-1 text-sm bg-blue-100 hover:bg-blue-200 text-blue-700 rounded transition">
+                        Edit
+                    </button>
+                </div>
+            </div>
+        `).join('');
+    } catch (error) {
+        console.error('Failed to load epics:', error);
+    }
+}
+
+function openCreateEpicModal() {
+    document.getElementById('modal-title').textContent = 'Create Epic';
+    document.getElementById('epic-id').value = '';
+    document.getElementById('epic-form').reset();
+    document.getElementById('epic-color').value = '#3B82F6';
+    document.getElementById('epic-modal').classList.remove('hidden');
+}
+
+function editEpic(id, title, description, owner, color, status) {
+    document.getElementById('modal-title').textContent = 'Edit Epic';
+    document.getElementById('epic-id').value = id;
+    document.getElementById('epic-title').value = title;
+    document.getElementById('epic-description').value = description;
+    document.getElementById('epic-owner').value = owner;
+    document.getElementById('epic-color').value = color;
+    document.getElementById('epic-status').value = status;
+    document.getElementById('epic-modal').classList.remove('hidden');
+}
+
+function closeEpicModal() {
+    document.getElementById('epic-modal').classList.add('hidden');
+}
+
+async function saveEpic(event) {
+    event.preventDefault();
+    
+    const epicId = document.getElementById('epic-id').value;
+    const data = {
+        title: document.getElementById('epic-title').value,
+        description: document.getElementById('epic-description').value,
+        owner: document.getElementById('epic-owner').value,
+        color: document.getElementById('epic-color').value,
+        status: document.getElementById('epic-status').value
+    };
+    
+    try {
+        const url = epicId ? `/api/epics/${epicId}` : '/api/epics';
+        const method = epicId ? 'PUT' : 'POST';
+        
+        const response = await fetch(url, {
+            method: method,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        
+        if (response.ok) {
+            closeEpicModal();
+            loadEpics();
+        } else {
+            alert('Failed to save epic');
+        }
+    } catch (error) {
+        console.error('Error saving epic:', error);
+        alert('Failed to save epic');
+    }
+}
+
+async function viewEpicDetails(epicId) {
+    currentEpicId = epicId;
+    try {
+        const response = await fetch(`/api/epics/${epicId}`);
+        const data = await response.json();
+        
+        document.getElementById('details-title').textContent = data.epic.title;
+        
+        // Display epic details
+        document.getElementById('epic-details-content').innerHTML = `
+            <div class="grid grid-cols-2 gap-4 mb-4">
+                <div>
+                    <span class="font-medium">Status:</span> 
+                    <span class="ml-2 px-2 py-1 text-xs rounded ${
+                        data.epic.status === 'active' ? 'bg-green-100 text-green-800' :
+                        data.epic.status === 'completed' ? 'bg-blue-100 text-blue-800' :
+                        'bg-gray-100 text-gray-800'
+                    }">${data.epic.status}</span>
+                </div>
+                <div>
+                    <span class="font-medium">Owner:</span> ${data.epic.owner || 'Not assigned'}
+                </div>
+                <div>
+                    <span class="font-medium">Color:</span> 
+                    <span class="inline-block w-6 h-6 rounded ml-2" style="background-color: ${data.epic.color}"></span>
+                </div>
+                <div>
+                    <span class="font-medium">Created:</span> ${new Date(data.epic.created_at).toLocaleDateString()}
+                </div>
+            </div>
+            ${data.epic.description ? `
+                <div>
+                    <span class="font-medium">Description:</span>
+                    <p class="mt-1 text-gray-600">${data.epic.description}</p>
+                </div>
+            ` : ''}
+        `;
+        
+        // Display linked issues
+        if (data.issues && data.issues.length > 0) {
+            document.getElementById('epic-issues-list').innerHTML = data.issues.map(issue => `
+                <div class="flex justify-between items-center p-3 bg-gray-50 rounded">
+                    <div>
+                        <a href="https://github.com/${issue.author}/${issue.repository}/issues/${issue.number}" 
+                           target="_blank" class="text-blue-600 hover:underline font-medium">
+                            #${issue.number} - ${issue.title}
+                        </a>
+                        <div class="text-sm text-gray-500">
+                            ${issue.state} • ${issue.assignee ? `Assigned to ${issue.assignee}` : 'Unassigned'}
+                        </div>
+                    </div>
+                    <button onclick="removeIssueFromEpic(${issue.id})" 
+                            class="text-red-600 hover:text-red-800">
+                        Remove
+                    </button>
+                </div>
+            `).join('');
+        } else {
+            document.getElementById('epic-issues-list').innerHTML = '<p class="text-gray-500">No issues linked to this epic</p>';
+        }
+        
+        document.getElementById('epic-details-modal').classList.remove('hidden');
+    } catch (error) {
+        console.error('Failed to load epic details:', error);
+    }
+}
+
+function closeDetailsModal() {
+    document.getElementById('epic-details-modal').classList.add('hidden');
+    currentEpicId = null;
+}
+
+async function searchIssuesForEpic() {
+    const searchTerm = document.getElementById('issue-search').value;
+    if (!searchTerm) return;
+    
+    try {
+        const response = await fetch(`/api/issues/search?q=${encodeURIComponent(searchTerm)}`);
+        const issues = await response.json();
+        
+        document.getElementById('issue-search-results').innerHTML = issues.length > 0 ? 
+            `<div class="mt-2 max-h-48 overflow-y-auto border rounded p-2">
+                ${issues.map(issue => `
+                    <div class="p-2 hover:bg-gray-50 cursor-pointer flex justify-between items-center"
+                         onclick="addIssueToEpic(${issue.id})">
+                        <div>
+                            <span class="font-medium">#${issue.number}</span> - ${issue.title}
+                            <div class="text-xs text-gray-500">${issue.state}</div>
+                        </div>
+                        <button class="text-blue-600 hover:text-blue-800">Add</button>
+                    </div>
+                `).join('')}
+            </div>` :
+            '<p class="text-gray-500 mt-2">No issues found</p>';
+    } catch (error) {
+        console.error('Failed to search issues:', error);
+    }
+}
+
+async function addIssueToEpic(issueId) {
+    if (!currentEpicId) return;
+    
+    try {
+        const response = await fetch(`/api/epics/${currentEpicId}/issues`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ issue_id: issueId })
+        });
+        
+        if (response.ok) {
+            viewEpicDetails(currentEpicId); // Refresh the details
+            document.getElementById('issue-search').value = '';
+            document.getElementById('issue-search-results').innerHTML = '';
+        }
+    } catch (error) {
+        console.error('Failed to add issue to epic:', error);
+    }
+}
+
+async function removeIssueFromEpic(issueId) {
+    if (!currentEpicId) return;
+    
+    if (confirm('Remove this issue from the epic?')) {
+        try {
+            const response = await fetch(`/api/epics/${currentEpicId}/issues?issue_id=${issueId}`, {
+                method: 'DELETE'
+            });
+            
+            if (response.ok) {
+                viewEpicDetails(currentEpicId); // Refresh the details
+            }
+        } catch (error) {
+            console.error('Failed to remove issue from epic:', error);
+        }
+    }
+}
+</script>
+{{end}}

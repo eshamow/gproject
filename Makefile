@@ -1,5 +1,6 @@
-.PHONY: run dev test db-reset deps
+.PHONY: run dev test db-reset deps build clean docker-build docker-run docker-stop docker-logs
 
+# Go commands
 run:
 	go run cmd/web/main.go
 
@@ -23,3 +24,23 @@ build:
 clean:
 	rm -f data/gproject.db
 	rm -rf bin/
+
+# Docker commands
+docker-build:
+	docker build -t gproject:latest .
+
+docker-run:
+	docker-compose up --build
+
+docker-run-prod:
+	docker-compose -f docker-compose.prod.yml up -d
+
+docker-stop:
+	docker-compose down
+
+docker-logs:
+	docker-compose logs -f
+
+docker-clean:
+	docker-compose down -v
+	docker image prune -f

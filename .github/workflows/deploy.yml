@@ -1,0 +1,155 @@
+name: Deploy to Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+        default: staging
+      tag:
+        description: 'Docker image tag to deploy (leave empty for latest)'
+        required: false
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  deploy:
+    name: Deploy to ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: set-tag
+        run: |
+          if [ -z "${{ inputs.tag }}" ]; then
+            echo "IMAGE_TAG=latest" >> $GITHUB_OUTPUT
+          else
+            echo "IMAGE_TAG=${{ inputs.tag }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script: |
+            # Navigate to application directory
+            cd /opt/gproject
+            
+            # Pull latest docker-compose.prod.yml if changed
+            git pull origin main || true
+            
+            # Set environment variables
+            export GITHUB_REPOSITORY=${{ github.repository }}
+            export IMAGE_TAG=${{ steps.set-tag.outputs.IMAGE_TAG }}
+            
+            # Pull latest image
+            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${IMAGE_TAG}
+            
+            # Backup current database
+            if [ -f /var/lib/gproject/data/gproject.db ]; then
+              cp /var/lib/gproject/data/gproject.db /var/lib/gproject/backups/gproject-$(date +%Y%m%d-%H%M%S).db
+            fi
+            
+            # Stop current container
+            docker-compose -f docker-compose.prod.yml down || true
+            
+            # Start new container
+            docker-compose -f docker-compose.prod.yml up -d
+            
+            # Wait for health check
+            echo "Waiting for application to be healthy..."
+            timeout=60
+            while [ $timeout -gt 0 ]; do
+              if curl -f http://localhost:8080/health 2>/dev/null; then
+                echo "Application is healthy!"
+                break
+              fi
+              sleep 5
+              timeout=$((timeout-5))
+            done
+            
+            if [ $timeout -eq 0 ]; then
+              echo "Health check failed! Rolling back..."
+              docker-compose -f docker-compose.prod.yml down
+              # Restore previous version if available
+              docker-compose -f docker-compose.prod.yml up -d --force-recreate
+              exit 1
+            fi
+            
+            # Clean up old images
+            docker image prune -f
+
+      - name: Verify deployment
+        run: |
+          echo "Verifying deployment at ${{ secrets.DEPLOY_URL || 'http://localhost:8080' }}"
+          sleep 10
+          curl -f "${{ secrets.DEPLOY_URL || 'http://localhost:8080' }}/health" || exit 1
+          echo "Deployment successful!"
+
+      - name: Notify deployment status
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const status = '${{ job.status }}' === 'success' ? '✅' : '❌';
+            const environment = '${{ inputs.environment }}';
+            const tag = '${{ steps.set-tag.outputs.IMAGE_TAG }}';
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue?.number || 1,
+              body: `${status} Deployment to **${environment}** completed\n\n` +
+                    `- Image: \`${tag}\`\n` +
+                    `- Status: \`${{ job.status }}\`\n` +
+                    `- Time: ${new Date().toISOString()}`
+            }).catch(() => {
+              console.log('No issue to comment on');
+            });
+
+  rollback:
+    name: Rollback Instructions
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: failure()
+    steps:
+      - name: Display rollback instructions
+        run: |
+          echo "🔄 ROLLBACK INSTRUCTIONS"
+          echo "========================"
+          echo ""
+          echo "To rollback to the previous version, run:"
+          echo ""
+          echo "1. SSH into the server:"
+          echo "   ssh user@server"
+          echo ""
+          echo "2. Navigate to application directory:"
+          echo "   cd /opt/gproject"
+          echo ""
+          echo "3. List available backups:"
+          echo "   ls -la /var/lib/gproject/backups/"
+          echo ""
+          echo "4. Restore database backup if needed:"
+          echo "   cp /var/lib/gproject/backups/gproject-TIMESTAMP.db /var/lib/gproject/data/gproject.db"
+          echo ""
+          echo "5. Deploy previous image tag:"
+          echo "   docker-compose -f docker-compose.prod.yml down"
+          echo "   export IMAGE_TAG=previous-tag"
+          echo "   docker-compose -f docker-compose.prod.yml up -d"
+          echo ""
+          echo "6. Verify rollback:"
+          echo "   curl http://localhost:8080/health"

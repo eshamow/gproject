@@ -1,0 +1,48 @@
+# Git
+.git
+.gitignore
+
+# Development files
+.env
+.env.local
+.air.toml
+*.log
+
+# Database files (will be mounted as volume)
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# Test files
+*_test.go
+coverage.out
+test_*.html
+
+# Documentation
+*.md
+docs/
+
+# CI/CD
+.github/
+docker-compose*.yml
+Dockerfile
+
+# Build artifacts
+bin/
+dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+tmp/
+temp/

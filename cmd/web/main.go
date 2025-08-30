@@ -219,6 +219,9 @@ func main() {
 	mux.HandleFunc("/webhook/github", app.handleWebhook)
 	mux.HandleFunc("/events", app.handleSSE) // Remove requireAuth to allow public SSE connection
 	
+	// Health check endpoint for monitoring
+	mux.HandleFunc("/health", app.handleHealth)
+	
 	// Safari SSE debug page (development only)
 	mux.HandleFunc("/safari_sse_test.html", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "safari_sse_test.html")
@@ -263,6 +266,47 @@ func (app *App) handleHome(w http.ResponseWriter, r *http.Request) {
 	if err := app.templates["home.html"].ExecuteTemplate(w, "base.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+// handleHealth provides a health check endpoint for monitoring
+func (app *App) handleHealth(w http.ResponseWriter, r *http.Request) {
+	// Only accept GET requests
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Check database connectivity
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+
+	var dbStatus string
+	err := app.db.QueryRowContext(ctx, "SELECT 'ok'").Scan(&dbStatus)
+	
+	health := struct {
+		Status   string    `json:"status"`
+		Database string    `json:"database"`
+		Version  string    `json:"version"`
+		Time     time.Time `json:"time"`
+	}{
+		Status:   "ok",
+		Database: "ok",
+		Version:  "1.0.0", // You can inject this from build flags
+		Time:     time.Now().UTC(),
+	}
+
+	if err != nil {
+		health.Status = "degraded"
+		health.Database = "error: " + err.Error()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(health)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(health)
 }
 
 func (app *App) handleDashboard(w http.ResponseWriter, r *http.Request) {

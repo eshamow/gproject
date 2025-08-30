@@ -45,15 +45,61 @@ type App struct {
 	syncStatus  *SyncStatus              // Current sync status
 }
 
-// RateLimiter implements a simple in-memory rate limiter
+// RateLimiter implements a simple in-memory rate limiter with automatic cleanup
 type RateLimiter struct {
 	attempts map[string][]time.Time
 	mu       sync.RWMutex
+	stopChan chan struct{}
 }
 
 func NewRateLimiter() *RateLimiter {
-	return &RateLimiter{
+	rl := &RateLimiter{
 		attempts: make(map[string][]time.Time),
+		stopChan: make(chan struct{}),
+	}
+	// Start cleanup goroutine to prevent memory leak
+	go rl.cleanupRoutine()
+	return rl
+}
+
+// Stop gracefully shuts down the rate limiter
+func (rl *RateLimiter) Stop() {
+	close(rl.stopChan)
+}
+
+// cleanupRoutine periodically removes old entries to prevent memory leak
+func (rl *RateLimiter) cleanupRoutine() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	
+	for {
+		select {
+		case <-ticker.C:
+			rl.cleanup()
+		case <-rl.stopChan:
+			return
+		}
+	}
+}
+
+// cleanup removes entries older than 1 hour
+func (rl *RateLimiter) cleanup() {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	
+	cutoff := time.Now().Add(-1 * time.Hour)
+	for key, attempts := range rl.attempts {
+		var valid []time.Time
+		for _, t := range attempts {
+			if t.After(cutoff) {
+				valid = append(valid, t)
+			}
+		}
+		if len(valid) == 0 {
+			delete(rl.attempts, key)
+		} else {
+			rl.attempts[key] = valid
+		}
 	}
 }
 
@@ -64,7 +110,7 @@ func (rl *RateLimiter) Allow(key string, limit int, window time.Duration) bool {
 	now := time.Now()
 	cutoff := now.Add(-window)
 	
-	// Clean old attempts
+	// Clean old attempts for this key
 	if attempts, exists := rl.attempts[key]; exists {
 		var valid []time.Time
 		for _, t := range attempts {
@@ -296,8 +342,14 @@ func (app *App) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err != nil {
+		// Don't expose database error details in production
 		health.Status = "degraded"
-		health.Database = "error: " + err.Error()
+		if app.config.Environment == "production" {
+			health.Database = "unavailable"
+			log.Printf("Health check database error: %v", err) // Log the actual error server-side
+		} else {
+			health.Database = "error: " + err.Error()
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		json.NewEncoder(w).Encode(health)
@@ -343,7 +395,12 @@ func (app *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := app.templates["dashboard.html"].ExecuteTemplate(w, "base.html", data); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("Template execution error: %v", err)
+		if app.config.Environment == "production" {
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+		} else {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 	}
 }
 
@@ -1906,7 +1963,7 @@ func (app *App) validateCSRFToken(r *http.Request, token string) bool {
 	return err == nil && valid
 }
 
-// securityHeaders adds security headers to all responses
+// securityHeaders adds comprehensive security headers to all responses
 func (app *App) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Prevent clickjacking attacks
@@ -1921,6 +1978,9 @@ func (app *App) securityHeaders(next http.Handler) http.Handler {
 		// Referrer policy for privacy
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		
+		// Permissions Policy (formerly Feature Policy)
+		w.Header().Set("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+		
 		// Content Security Policy
 		csp := "default-src 'self'; " +
 			"script-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.tailwindcss.com; " +
@@ -1931,11 +1991,16 @@ func (app *App) securityHeaders(next http.Handler) http.Handler {
 			"object-src 'none'; " +
 			"base-uri 'self'; " +
 			"form-action 'self'; " +
-			"frame-ancestors 'none'"
+			"frame-ancestors 'none'; " +
+			"block-all-mixed-content"
 		
-		// Only upgrade to HTTPS in production
+		// Production-specific headers
 		if app.config.Environment == "production" {
 			csp += "; upgrade-insecure-requests"
+			// HTTP Strict Transport Security (HSTS)
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload")
+			// Additional production headers
+			w.Header().Set("X-Permitted-Cross-Domain-Policies", "none")
 		}
 		w.Header().Set("Content-Security-Policy", csp)
 		
@@ -1993,7 +2058,12 @@ func (app *App) handleEpics(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	if err := app.templates["epics.html"].ExecuteTemplate(w, "base.html", data); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("Template execution error: %v", err)
+		if app.config.Environment == "production" {
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+		} else {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 	}
 }
 
@@ -2005,7 +2075,12 @@ func (app *App) handleThemes(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	if err := app.templates["themes.html"].ExecuteTemplate(w, "base.html", data); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("Template execution error: %v", err)
+		if app.config.Environment == "production" {
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+		} else {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 	}
 }
 
@@ -2017,7 +2092,12 @@ func (app *App) handleReports(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	if err := app.templates["reports.html"].ExecuteTemplate(w, "base.html", data); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("Template execution error: %v", err)
+		if app.config.Environment == "production" {
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+		} else {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 	}
 }
 

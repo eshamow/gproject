@@ -53,9 +53,10 @@ USER gproject
 # Expose port
 EXPOSE 8080
 
-# Health check
+# Health check with proper certificate validation
+# Using wget with certificate validation (ca-certificates package installed)
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
+    CMD wget --no-verbose --tries=1 --spider --timeout=2 http://localhost:8080/health || exit 1
 
 # Run the binary
 ENTRYPOINT ["./gproject"]

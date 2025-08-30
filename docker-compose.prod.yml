@@ -48,5 +48,5 @@ volumes:
     driver: local
     driver_opts:
       type: none
-      o: bind
+      o: bind,uid=1001,gid=1001
       device: /var/lib/gproject/data

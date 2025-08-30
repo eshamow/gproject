@@ -322,13 +322,6 @@ func (app *App) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check database connectivity
-	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-	defer cancel()
-
-	var dbStatus string
-	err := app.db.QueryRowContext(ctx, "SELECT 'ok'").Scan(&dbStatus)
-	
 	health := struct {
 		Status   string    `json:"status"`
 		Database string    `json:"database"`
@@ -340,6 +333,28 @@ func (app *App) handleHealth(w http.ResponseWriter, r *http.Request) {
 		Version:  "1.0.0", // You can inject this from build flags
 		Time:     time.Now().UTC(),
 	}
+
+	// Check if database is configured
+	if app.db == nil {
+		health.Status = "degraded"
+		if app.config.Environment == "production" {
+			health.Database = "unavailable"
+			log.Printf("Health check: database not configured")
+		} else {
+			health.Database = "error: database not configured"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(health)
+		return
+	}
+
+	// Check database connectivity
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+
+	var dbStatus string
+	err := app.db.QueryRowContext(ctx, "SELECT 'ok'").Scan(&dbStatus)
 
 	if err != nil {
 		// Don't expose database error details in production
@@ -361,6 +376,7 @@ func (app *App) handleHealth(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(health)
 }
 
+
 func (app *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	user := app.getCurrentUser(r)
 	
@@ -377,14 +393,17 @@ func (app *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		ClosedIssues int
 	}
 	
-	row := app.db.QueryRow(`
-		SELECT 
-			COUNT(*) as total,
-			COUNT(CASE WHEN state = 'open' THEN 1 END) as open,
-			COUNT(CASE WHEN state = 'closed' THEN 1 END) as closed
-		FROM issues
-	`)
-	row.Scan(&stats.TotalIssues, &stats.OpenIssues, &stats.ClosedIssues)
+	// Only query database if it's available
+	if app.db != nil {
+		row := app.db.QueryRow(`
+			SELECT 
+				COUNT(*) as total,
+				COUNT(CASE WHEN state = 'open' THEN 1 END) as open,
+				COUNT(CASE WHEN state = 'closed' THEN 1 END) as closed
+			FROM issues
+		`)
+		row.Scan(&stats.TotalIssues, &stats.OpenIssues, &stats.ClosedIssues)
+	}
 
 	data := map[string]interface{}{
 		"User":      user,
@@ -394,7 +413,19 @@ func (app *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		"CSRFToken": csrfToken,
 	}
 
-	if err := app.templates["dashboard.html"].ExecuteTemplate(w, "base.html", data); err != nil {
+	// Check if template exists before executing
+	tmpl, exists := app.templates["dashboard.html"]
+	if !exists || tmpl == nil {
+		log.Printf("Template error: dashboard.html not found")
+		if app.config.Environment == "production" {
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+		} else {
+			http.Error(w, "Template not found: dashboard.html", http.StatusInternalServerError)
+		}
+		return
+	}
+
+	if err := tmpl.ExecuteTemplate(w, "base.html", data); err != nil {
 		log.Printf("Template execution error: %v", err)
 		if app.config.Environment == "production" {
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -403,6 +434,8 @@ func (app *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 }
+
+
 
 func (app *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// Rate limit login attempts by IP

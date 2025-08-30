@@ -16,6 +16,12 @@ on:
         required: false
         type: string
 
+# Minimal permissions
+permissions:
+  contents: read
+  packages: write
+  deployments: write
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}

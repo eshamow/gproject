@@ -17,8 +17,10 @@ func TestTokenEncryption(t *testing.T) {
 	app := &App{
 		config: Config{
 			SessionSecret: testSecret,
+			EncryptionKey: testSecret,
 		},
 	}
+	// No rate limiter created, so no cleanup needed
 
 	tests := []struct {
 		name      string
@@ -100,6 +102,7 @@ func TestTokenEncryptionWithoutKey(t *testing.T) {
 	app := &App{
 		config: Config{
 			SessionSecret: "", // Empty session secret
+			EncryptionKey: "", // Empty encryption key
 		},
 	}
 
@@ -122,10 +125,11 @@ func TestTokenEncryptionWithoutKey(t *testing.T) {
 // TestTokenEncryptionKeyRotation verifies tokens can't be decrypted with wrong key
 // IMPORTANT: Ensures key rotation doesn't expose old tokens
 func TestTokenEncryptionKeyRotation(t *testing.T) {
-	// Encrypt with first session secret
+	// Encrypt with first encryption key
 	app1 := &App{
 		config: Config{
 			SessionSecret: "first-session-secret-key",
+			EncryptionKey: "first-encryption-key-for-tokens",
 		},
 	}
 	
@@ -135,10 +139,11 @@ func TestTokenEncryptionKeyRotation(t *testing.T) {
 		t.Fatalf("Failed to encrypt with first key: %v", err)
 	}
 	
-	// Try to decrypt with different session secret
+	// Try to decrypt with different encryption key
 	app2 := &App{
 		config: Config{
 			SessionSecret: "second-different-session-secret",
+			EncryptionKey: "second-different-encryption-key",
 		},
 	}
 	
@@ -161,6 +166,7 @@ func TestEncryptionConsistency(t *testing.T) {
 	app := &App{
 		config: Config{
 			SessionSecret: "test-session-secret-for-consistency",
+			EncryptionKey: "test-encryption-key-consistency",
 		},
 	}
 	token := "ghp_sametoken"
@@ -213,6 +219,7 @@ func TestDatabaseTokenStorage(t *testing.T) {
 	app := &App{
 		config: Config{
 			SessionSecret: "test-secret-for-db-storage",
+			EncryptionKey: "test-encryption-key-for-storage",
 		},
 		db: db,
 	}

@@ -45,6 +45,7 @@ func setupTestApp(t *testing.T) *App {
 		config:      config,
 		rateLimiter: NewRateLimiter(),
 	}
+	defer app.rateLimiter.Stop() // Clean up goroutine
 
 	// Run migrations (using the standalone function from main.go)
 	runMigrations(db)

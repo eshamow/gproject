@@ -10,6 +10,8 @@ services:
     volumes:
       # Named volume for database persistence (not bind mount)
       - gproject-data:/app/data
+      # Temporary writable directory for SQLite WAL mode
+      - /tmp
     env_file:
       - .env.production
     environment:
@@ -17,6 +19,11 @@ services:
       DATABASE_URL: file:/app/data/gproject.db
       ENVIRONMENT: production
     restart: unless-stopped
+    # Security hardening
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
     networks:
       - gproject-network
     healthcheck:

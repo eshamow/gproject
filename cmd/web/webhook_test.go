@@ -23,6 +23,7 @@ func TestWebhookSignatureValidation(t *testing.T) {
 			WebhookSecret: "test-secret",
 		},
 	}
+	// No rate limiter created, so no cleanup needed
 
 	payload := []byte(`{"action":"opened","issue":{"number":1,"title":"Test"}}`)
 	

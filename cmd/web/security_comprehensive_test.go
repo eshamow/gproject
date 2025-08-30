@@ -46,7 +46,9 @@ func TestComprehensiveSecurityValidation(t *testing.T) {
 			Environment:   "production",
 		},
 		db: db,
+		rateLimiter: NewRateLimiter(), // Create rate limiter for test
 	}
+	defer app.rateLimiter.Stop() // Clean up goroutine
 
 	t.Run("Token Encryption Works", func(t *testing.T) {
 		// Test that tokens are encrypted and decrypted correctly

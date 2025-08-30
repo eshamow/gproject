@@ -14,12 +14,11 @@ import (
 
 // TestDashboardAutoRefresh tests that the dashboard has auto-refresh functionality  
 func TestDashboardAutoRefresh(t *testing.T) {
-	// This test verifies that the dashboard template includes auto-refresh JavaScript
-	// We check for the presence of the required JavaScript functions rather than
-	// executing the full handler which would require template setup
+	// This test verifies that the dashboard template includes auto-refresh functionality
+	// We check for the presence of HTMX polling attributes for auto-refresh
 	
 	// Read the dashboard template directly
-	templatePath := "../../web/templates/dashboard_simple.html"
+	templatePath := "templates/dashboard.html"
 	content, err := os.ReadFile(templatePath)
 	if err != nil {
 		t.Skipf("Skipping test - cannot read template file: %v", err)
@@ -28,15 +27,15 @@ func TestDashboardAutoRefresh(t *testing.T) {
 	
 	templateContent := string(content)
 
-	// Verify auto-refresh JavaScript is present
+	// Verify auto-refresh functionality is present (using HTMX)
 	checks := []struct {
 		name     string
 		contains string
 	}{
-		{"Has updateSyncStatus function", "function updateSyncStatus()"},
-		{"Has fetch call to sync status API", "fetch('/api/sync-status')"},
-		{"Has setInterval for auto-refresh", "setInterval(updateSyncStatus,"},
-		{"Has sync-status element", "document.getElementById('sync-status')"},
+		{"Has HTMX polling trigger", "hx-trigger=\"load, every 30s\""},
+		{"Has sync status target", "hx-target=\"#last-sync-info\""},
+		{"Has sync-status element", "id=\"sync-status\""},
+		{"Has API endpoint for sync", "hx-get=\"/api/sync/status\""},
 	}
 
 	for _, check := range checks {
@@ -98,6 +97,7 @@ func TestAPISyncStatusEndpoint(t *testing.T) {
 			InProgress:   false,
 		},
 	}
+	// No rate limiter created, so no cleanup needed
 
 	req := httptest.NewRequest("GET", "/api/sync-status", nil)
 	w := httptest.NewRecorder()
@@ -138,7 +138,7 @@ func TestNoSSEReferences(t *testing.T) {
 	// We check the template content directly to avoid needing full handler setup
 	
 	// Read the dashboard template directly
-	templatePath := "../../web/templates/dashboard_simple.html"
+	templatePath := "templates/dashboard.html"
 	content, err := os.ReadFile(templatePath)
 	if err != nil {
 		t.Skipf("Skipping test - cannot read template file: %v", err)
@@ -160,14 +160,14 @@ func TestNoSSEReferences(t *testing.T) {
 		}
 	}
 
-	// Verify polling is used instead
-	if !strings.Contains(templateContent, "setInterval") {
-		t.Error("Expected to find setInterval for polling in template, but it's missing")
+	// Verify HTMX polling is used instead
+	if !strings.Contains(templateContent, "hx-trigger") || !strings.Contains(templateContent, "every") {
+		t.Error("Expected to find HTMX polling (hx-trigger with 'every') in template, but it's missing")
 	}
 	
-	// Verify fetch is used for polling
-	if !strings.Contains(templateContent, "fetch('/api/sync-status')") {
-		t.Error("Expected to find fetch call for sync status polling")
+	// Verify HTMX GET is used for polling
+	if !strings.Contains(templateContent, "hx-get=\"/api/sync/status\"") {
+		t.Error("Expected to find HTMX GET call for sync status polling")
 	}
 }
 

@@ -29,6 +29,7 @@ func TestEpicAccessControl(t *testing.T) {
 			SessionSecret: "test-secret-key-for-testing-only",
 		},
 	}
+	defer app.rateLimiter.Stop() // Clean up goroutine
 	
 	// Create two users with sessions
 	user1ID, session1ID, csrf1Token := createTestUserSession(t, app)

@@ -2,7 +2,6 @@ package main
 
 import (
 	"crypto/hmac"
-	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -19,6 +18,7 @@ import (
 // TestRateLimitingValidation verifies rate limiting prevents API abuse
 func TestRateLimitingValidation(t *testing.T) {
 	rl := NewRateLimiter()
+	defer rl.Stop() // Clean up goroutine
 	
 	tests := []struct {
 		name        string
@@ -65,6 +65,7 @@ func TestRateLimitingValidation(t *testing.T) {
 // TestRateLimitingWindowReset verifies rate limit resets after window
 func TestRateLimitingWindowReset(t *testing.T) {
 	rl := NewRateLimiter()
+	defer rl.Stop() // Clean up goroutine
 	key := "test-user"
 	limit := 2
 	window := 100 * time.Millisecond
@@ -93,6 +94,7 @@ func TestRateLimitingWindowReset(t *testing.T) {
 // TestRateLimitingConcurrency verifies thread-safe rate limiting
 func TestRateLimitingConcurrency(t *testing.T) {
 	rl := NewRateLimiter()
+	defer rl.Stop() // Clean up goroutine
 	key := "concurrent-user"
 	limit := 10
 	window := 1 * time.Second
@@ -144,12 +146,13 @@ func TestSessionFixationPrevention(t *testing.T) {
 			GitHubClientSecret: "test-client-secret",
 		},
 	}
+	defer app.rateLimiter.Stop() // Clean up goroutine
 	
 	// Create initial anonymous session
 	w1 := httptest.NewRecorder()
 	
 	// Simulate setting a session cookie before auth
-	initialSessionID := generateSecureToken()
+	initialSessionID := generateSecureToken(32)
 	http.SetCookie(w1, &http.Cookie{
 		Name:     "session",
 		Value:    initialSessionID,
@@ -175,7 +178,7 @@ func TestSessionFixationPrevention(t *testing.T) {
 	}
 	
 	// Create new authenticated session (should have different ID)
-	newSessionID := generateSecureToken()
+	newSessionID := generateSecureToken(32)
 	_, err = app.db.Exec(`
 		INSERT INTO sessions (id, user_id, expires_at)
 		VALUES (?, ?, ?)`,
@@ -567,7 +570,7 @@ func createTestUserSessionSecure(t *testing.T, app *App) (int64, string, error) 
 	}
 	
 	// Create session
-	sessionID := generateSecureToken()
+	sessionID := generateSecureToken(32)
 	_, err = app.db.Exec(`
 		INSERT INTO sessions (id, user_id, expires_at)
 		VALUES (?, ?, ?)`,
@@ -579,14 +582,6 @@ func createTestUserSessionSecure(t *testing.T, app *App) (int64, string, error) 
 	return userID, sessionID, nil
 }
 
-// Helper function to generate secure random tokens
-func generateSecureToken() string {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		panic(err) // In tests, panic is acceptable
-	}
-	return hex.EncodeToString(b)
-}
 
 // Helper function to compute webhook signature like GitHub does
 func computeWebhookSignature(payload, secret string) string {

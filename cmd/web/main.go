@@ -139,6 +139,7 @@ type Config struct {
 	GitHubRedirectURL  string
 	SessionSecret      string
 	GitHubRepoOwner    string
+	EncryptionKey      string // Separate key for token encryption
 	GitHubRepoName     string
 	Environment        string
 	WebhookSecret      string // GitHub webhook secret for signature validation
@@ -188,6 +189,7 @@ func main() {
 		GitHubClientSecret: mustGetEnv("GITHUB_CLIENT_SECRET"),
 		GitHubRedirectURL:  getEnv("GITHUB_REDIRECT_URL", "http://localhost:8080/auth/callback"),
 		SessionSecret:      mustGetEnv("SESSION_SECRET"),
+		EncryptionKey:      getEnv("ENCRYPTION_KEY", mustGetEnv("SESSION_SECRET")), // Falls back to SESSION_SECRET for backward compatibility
 		GitHubRepoOwner:    mustGetEnv("GITHUB_REPO_OWNER"),
 		GitHubRepoName:     mustGetEnv("GITHUB_REPO_NAME"),
 		Environment:        getEnv("ENVIRONMENT", "development"),
@@ -451,7 +453,8 @@ func (app *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	
 	config := app.getOAuthConfig()
 	// Generate random state for CSRF protection
-	state := generateRandomString(32)
+	// Generate secure state parameter with 256 bits of entropy for OAuth CSRF protection
+	state := generateSecureToken(32)
 
 	// Store state in session/cookie for validation
 	http.SetCookie(w, &http.Cookie{
@@ -628,7 +631,8 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create session
-	sessionID := generateRandomString(32)
+	// Generate cryptographically secure session ID with 256 bits of entropy (32 bytes = 64 hex chars)
+	sessionID := generateSecureToken(32)
 	_, err = app.db.Exec(`
 		INSERT INTO sessions (id, user_id, expires_at)
 		VALUES (?, ?, datetime('now', '+7 days'))
@@ -1900,18 +1904,35 @@ func mustGetEnv(key string) string {
 	return value
 }
 
-func generateRandomString(length int) string {
-	b := make([]byte, length)
+// generateSecureToken generates a cryptographically secure random token.
+// The byteLength parameter specifies the number of random bytes to generate.
+// The returned hex string will be 2x the byte length (e.g., 32 bytes = 64 hex chars).
+// For session IDs, use at least 16 bytes (128 bits of entropy).
+func generateSecureToken(byteLength int) string {
+	if byteLength < 16 {
+		panic("generateSecureToken: minimum 16 bytes required for security")
+	}
+	b := make([]byte, byteLength)
 	if _, err := rand.Read(b); err != nil {
-		panic(fmt.Sprintf("Failed to generate random string: %v", err))
+		panic(fmt.Sprintf("Failed to generate secure random token: %v", err))
 	}
 	return hex.EncodeToString(b)
+}
+
+// generateRandomString is deprecated - use generateSecureToken instead
+func generateRandomString(length int) string {
+	// Maintain backward compatibility but use secure implementation
+	// This generates 'length' bytes, resulting in 2*length hex characters
+	if length < 16 {
+		length = 16 // Enforce minimum security
+	}
+	return generateSecureToken(length)
 }
 
 // encryptToken encrypts a token using AES-256-GCM
 func (app *App) encryptToken(plaintext string) (string, error) {
 	// Derive key from session secret
-	key := sha256.Sum256([]byte(app.config.SessionSecret))
+	key := sha256.Sum256([]byte(app.config.EncryptionKey))
 	
 	block, err := aes.NewCipher(key[:])
 	if err != nil {
@@ -1939,7 +1960,7 @@ func (app *App) decryptToken(ciphertext string) (string, error) {
 		return "", err
 	}
 
-	key := sha256.Sum256([]byte(app.config.SessionSecret))
+	key := sha256.Sum256([]byte(app.config.EncryptionKey))
 	
 	block, err := aes.NewCipher(key[:])
 	if err != nil {
@@ -1967,7 +1988,8 @@ func (app *App) decryptToken(ciphertext string) (string, error) {
 
 // generateCSRFToken creates a new CSRF token for the session
 func (app *App) generateCSRFToken(sessionID string) string {
-	token := generateRandomString(32)
+	// Generate secure CSRF token with 256 bits of entropy
+	token := generateSecureToken(32)
 	// Store in database with expiration
 	app.db.Exec(`
 		INSERT OR REPLACE INTO csrf_tokens (session_id, token, expires_at)
@@ -2045,7 +2067,8 @@ func (app *App) securityHeaders(next http.Handler) http.Handler {
 		// Add request ID for tracing
 		requestID := r.Header.Get("X-Request-ID")
 		if requestID == "" {
-			requestID = generateRandomString(16)
+			// Generate request ID with 128 bits of entropy
+			requestID = generateSecureToken(16)
 		}
 		w.Header().Set("X-Request-ID", requestID)
 		

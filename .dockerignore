@@ -13,6 +13,11 @@ data/
 *.db
 *.db-shm
 *.db-wal
+*.sqlite
+
+# Security files
+*.key
+*.pem
 
 # Test files
 *_test.go
@@ -46,3 +51,6 @@ Thumbs.db
 # Temporary files
 tmp/
 temp/
+
+# Node modules (even though we don't use them)
+node_modules/

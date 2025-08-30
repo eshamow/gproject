@@ -29,6 +29,7 @@ func TestTestHelperSecurityValidation(t *testing.T) {
 			SessionSecret: "test-secret-key-for-testing-only",
 		},
 	}
+	defer app.rateLimiter.Stop() // Clean up goroutine
 	
 	t.Run("TestHelperCreatesValidSession", func(t *testing.T) {
 		// Use the test helper

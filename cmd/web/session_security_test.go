@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"database/sql"
 	"net/http"
 	"net/http/httptest"
@@ -159,6 +158,7 @@ func TestActualSessionCookieCreation(t *testing.T) {
 				},
 				db: db,
 			}
+			// No rate limiter created, so no cleanup needed
 
 			// Test OAuth state cookie
 			rr := httptest.NewRecorder()
@@ -417,9 +417,8 @@ func TestSessionIDEntropy(t *testing.T) {
 	minLength := 32 // Minimum acceptable length for session ID
 
 	for i := 0; i < 100; i++ {
-		// Generate a mock session ID for testing
-		// In real code, this would use crypto/rand
-		sessionID := fmt.Sprintf("session-%d-%d", time.Now().UnixNano(), i)
+		// Use the actual secure token generation function
+		sessionID := generateSecureToken(32) // 32 bytes = 64 hex chars
 		
 		// Check minimum length
 		if len(sessionID) < minLength {

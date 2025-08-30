@@ -89,6 +89,7 @@ func TestEpicsCRUD(t *testing.T) {
 			SessionSecret: "test-secret-key-for-testing-only",
 		},
 	}
+	defer app.rateLimiter.Stop() // Clean up goroutine
 	
 	// Create authenticated test user
 	_, sessionID, csrfToken := createTestUserSession(t, app)

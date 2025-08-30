@@ -30,23 +30,23 @@ func TestHealthEndpoint(t *testing.T) {
 					Version  string    `json:"version"`
 					Time     time.Time `json:"time"`
 				}
-				
+
 				if err := json.Unmarshal(body, &health); err != nil {
 					t.Fatalf("Failed to unmarshal response: %v", err)
 				}
-				
+
 				if health.Status != "ok" {
 					t.Errorf("Expected status 'ok', got '%s'", health.Status)
 				}
-				
+
 				if health.Database != "ok" {
 					t.Errorf("Expected database 'ok', got '%s'", health.Database)
 				}
-				
+
 				if health.Version == "" {
 					t.Error("Version should not be empty")
 				}
-				
+
 				if health.Time.IsZero() {
 					t.Error("Time should not be zero")
 				}
@@ -103,7 +103,7 @@ func TestHealthEndpoint(t *testing.T) {
 func TestHealthEndpointDatabaseFailure(t *testing.T) {
 	// Set up test app
 	app := setupTestApp(t)
-	
+
 	// Close the database to simulate failure
 	app.db.Close()
 
@@ -125,15 +125,15 @@ func TestHealthEndpointDatabaseFailure(t *testing.T) {
 		Status   string `json:"status"`
 		Database string `json:"database"`
 	}
-	
+
 	if err := json.Unmarshal(rr.Body.Bytes(), &health); err != nil {
 		t.Fatalf("Failed to unmarshal response: %v", err)
 	}
-	
+
 	if health.Status != "degraded" {
 		t.Errorf("Expected status 'degraded' when database is down, got '%s'", health.Status)
 	}
-	
+
 	if !contains(health.Database, "error:") {
 		t.Errorf("Expected database field to contain 'error:', got '%s'", health.Database)
 	}

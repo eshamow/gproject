@@ -52,7 +52,7 @@ func TestHealthEndpointErrorMasking(t *testing.T) {
 		},
 		rateLimiter: NewRateLimiter(),
 	}
-	defer app.rateLimiter.Stop()
+	defer app.rateLimiter.Stop() // Clean up goroutine
 	
 	// Close the database to force an error
 	if app.db != nil {

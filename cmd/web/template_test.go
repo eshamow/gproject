@@ -13,7 +13,7 @@ func TestTemplateIsolation(t *testing.T) {
 	// Initialize templates the same way the app does
 	templates := make(map[string]*template.Template)
 	pages := []string{"home.html", "dashboard.html", "issues.html"}
-	
+
 	for _, page := range pages {
 		tmpl, err := template.ParseFS(templateFS, "templates/base.html", "templates/"+page)
 		if err != nil {
@@ -21,7 +21,7 @@ func TestTemplateIsolation(t *testing.T) {
 		}
 		templates[page] = tmpl
 	}
-	
+
 	// Test data
 	data := map[string]interface{}{
 		"User": map[string]interface{}{
@@ -38,7 +38,7 @@ func TestTemplateIsolation(t *testing.T) {
 		"RepoName":  "repo",
 		"CSRFToken": "test-token",
 	}
-	
+
 	tests := []struct {
 		name          string
 		template      string
@@ -48,7 +48,7 @@ func TestTemplateIsolation(t *testing.T) {
 		{"Dashboard page", "dashboard.html", "GProject - Dashboard"},
 		{"Issues page", "issues.html", "GProject - Issues"},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf bytes.Buffer
@@ -56,7 +56,7 @@ func TestTemplateIsolation(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Failed to execute %s: %v", tt.template, err)
 			}
-			
+
 			output := buf.String()
 			expectedTag := "<title>" + tt.expectedTitle + "</title>"
 			if !strings.Contains(output, expectedTag) {
@@ -65,9 +65,9 @@ func TestTemplateIsolation(t *testing.T) {
 				end := strings.Index(output, "</title>")
 				actualTitle := ""
 				if start >= 0 && end > start {
-					actualTitle = output[start:end+8]
+					actualTitle = output[start : end+8]
 				}
-				t.Errorf("Template %s: expected title tag %q, got %q", 
+				t.Errorf("Template %s: expected title tag %q, got %q",
 					tt.template, expectedTag, actualTitle)
 			}
 		})
